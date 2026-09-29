@@ -1,0 +1,226 @@
+diff --git a/robomimic/algo/diffusion_policy.py b/robomimic/algo/diffusion_policy.py
+index 2d2b20d..9524aa6 100644
+--- a/robomimic/algo/diffusion_policy.py
++++ b/robomimic/algo/diffusion_policy.py
+@@ -2,6 +2,7 @@
+ Implementation of Diffusion Policy https://diffusion-policy.cs.columbia.edu/ by Cheng Chi
+ """
+ from typing import Callable, Union
++from copy import deepcopy
+ import math
+ from collections import OrderedDict, deque
+ from packaging.version import parse as parse_version
+@@ -12,7 +13,6 @@ import torch.nn.functional as F
+ # requires diffusers==0.11.1
+ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+-from diffusers.training_utils import EMAModel
+ 
+ import robomimic.models.obs_nets as ObsNets
+ import robomimic.utils.tensor_utils as TensorUtils
+@@ -26,6 +26,37 @@ import robomimic.utils.torch_utils as TorchUtils
+ import robomimic.utils.tensor_utils as TensorUtils
+ import robomimic.utils.obs_utils as ObsUtils
+ 
++
++class LegacyEMAModel:
++    """
++    Compatibility implementation of the model-based EMAModel API used by
++    diffusers 0.11.1. Newer diffusers releases expose parameter shadows
++    instead of ``averaged_model``.
++    """
++
++    def __init__(self, model, power=2.0 / 3.0, max_decay=0.9999):
++        self.averaged_model = deepcopy(model).eval()
++        self.averaged_model.requires_grad_(False)
++        self.power = power
++        self.max_decay = max_decay
++        self.optimization_step = 0
++
++    def get_decay(self, optimization_step):
++        epoch = max(0, optimization_step - 1)
++        value = 1 - (1 + epoch) ** (-self.power)
++        return min(value, self.max_decay)
++
++    @torch.no_grad()
++    def step(self, model):
++        self.optimization_step += 1
++        decay = self.get_decay(self.optimization_step)
++        one_minus_decay = 1 - decay
++        for averaged_param, param in zip(
++            self.averaged_model.parameters(),
++            model.parameters(),
++        ):
++            averaged_param.sub_(one_minus_decay * (averaged_param - param))
++
+ @register_algo_factory_func("diffusion_policy")
+ def algo_config_to_class(algo_config):
+     """
+@@ -107,7 +138,7 @@ class DiffusionPolicyUNet(PolicyAlgo):
+         # setup EMA
+         ema = None
+         if self.algo_config.ema.enabled:
+-            ema = EMAModel(model=nets, power=self.algo_config.ema.power)
++            ema = LegacyEMAModel(model=nets, power=self.algo_config.ema.power)
+                 
+         # set attrs
+         self.nets = nets
+diff --git a/robomimic/utils/dataset.py b/robomimic/utils/dataset.py
+index 499714f..202b7da 100644
+--- a/robomimic/utils/dataset.py
++++ b/robomimic/utils/dataset.py
+@@ -125,6 +125,7 @@ class SequenceDataset(torch.utils.data.Dataset):
+ 
+         # set up lang and language embedding
+         self.dataset_lang = dataset_lang # language for entire dataset
++        self.lang_encoder = lang_encoder
+ 
+         self.n_frame_stack = frame_stack
+         assert self.n_frame_stack >= 1
+@@ -258,10 +259,14 @@ class SequenceDataset(torch.utils.data.Dataset):
+                 self._index_to_demo_id[self.total_num_sequences] = ep
+                 self.total_num_sequences += 1
+ 
+-        device = TorchUtils.get_torch_device(try_to_use_cuda=True)
+-        lang_encoder = LangUtils.LangEncoder(
+-            device=device,
+-        )
++        owns_lang_encoder = self.lang_encoder is None
++        if owns_lang_encoder:
++            device = TorchUtils.get_torch_device(try_to_use_cuda=True)
++            lang_encoder = LangUtils.LangEncoder(
++                device=device,
++            )
++        else:
++            lang_encoder = self.lang_encoder
+         
+         if len(self._demo_id_to_demo_lang_str) > 0:
+             print("getting language embeddings...")
+@@ -273,7 +278,8 @@ class SequenceDataset(torch.utils.data.Dataset):
+                 for batch_idx, ep in enumerate(ep_batch):
+                     self._demo_id_to_demo_lang_emb[ep] = emb_batch[batch_idx]
+ 
+-        del lang_encoder
++        if owns_lang_encoder:
++            del lang_encoder
+ 
+     @property
+     def hdf5_file(self):
+diff --git a/robomimic/utils/lang_utils.py b/robomimic/utils/lang_utils.py
+index bc1fc76..82df0dc 100644
+--- a/robomimic/utils/lang_utils.py
++++ b/robomimic/utils/lang_utils.py
+@@ -7,11 +7,21 @@ class LangEncoder:
+         os.environ["TOKENIZERS_PARALLELISM"] = "true" # needed to suppress warning about potential deadlock
+         model_variant = "openai/clip-vit-large-patch14" #"openai/clip-vit-base-patch32"
+         self.device = device
++        cache_dir = os.environ.get(
++            "HUGGINGFACE_HUB_CACHE",
++            os.path.expanduser("~/tmp/clip"),
++        )
+         self.lang_emb_model = CLIPTextModelWithProjection.from_pretrained(
+             model_variant,
+-            cache_dir=os.path.expanduser("~/tmp/clip")
++            cache_dir=cache_dir,
++            local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
+         ).to(device).eval()
+-        self.tz = AutoTokenizer.from_pretrained(model_variant, TOKENIZERS_PARALLELISM=True)
++        self.tz = AutoTokenizer.from_pretrained(
++            model_variant,
++            cache_dir=cache_dir,
++            local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
++            TOKENIZERS_PARALLELISM=True,
++        )
+ 
+     def get_lang_emb(self, lang):
+         if lang is None:
+@@ -34,4 +44,3 @@ class LangEncoder:
+             lang_emb = lang_emb[0]
+ 
+         return lang_emb
+-
+diff --git a/robomimic/utils/log_utils.py b/robomimic/utils/log_utils.py
+index 9edd6e5..5084dc8 100644
+--- a/robomimic/utils/log_utils.py
++++ b/robomimic/utils/log_utils.py
+@@ -33,10 +33,18 @@ class PrintLogger(object):
+         self.log_file.flush()
+ 
+     def flush(self):
+-        # this flush method is needed for python 3 compatibility.
+-        # this handles the flush command by doing nothing.
+-        # you might want to specify some extra behavior here.
+-        pass
++        self.terminal.flush()
++        self.log_file.flush()
++
++    def isatty(self):
++        return self.terminal.isatty()
++
++    def fileno(self):
++        return self.terminal.fileno()
++
++    @property
++    def encoding(self):
++        return self.terminal.encoding
+ 
+ 
+ class DataLogger(object):
+diff --git a/robomimic/utils/torch_utils.py b/robomimic/utils/torch_utils.py
+index 543b6fd..81a6807 100644
+--- a/robomimic/utils/torch_utils.py
++++ b/robomimic/utils/torch_utils.py
+@@ -139,9 +139,11 @@ def lr_scheduler_from_optim_params(net_optim_params, net, optimizer, num_trainin
+     """
+     lr_scheduler_type = net_optim_params["learning_rate"]["scheduler_type"]
+ 
++    # diffusers 0.38 no longer re-exports typing aliases from this module.
++    # The RoboCasa branch only needs the scheduler enum and dispatch table.
+     from diffusers.optimization import (
+-        Union, SchedulerType, Optional,
+-        Optimizer, TYPE_TO_SCHEDULER_FUNCTION
++        SchedulerType,
++        TYPE_TO_SCHEDULER_FUNCTION,
+     )
+ 
+     num_warmup_steps = net_optim_params["learning_rate"].get("num_warmup_steps", 10000)
+diff --git a/robomimic/utils/train_utils.py b/robomimic/utils/train_utils.py
+index 7b5ad77..94b1fba 100644
+--- a/robomimic/utils/train_utils.py
++++ b/robomimic/utils/train_utils.py
+@@ -47,6 +47,35 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
+         video_dir (str): path to video directory (sub-folder in experiment directory)
+             to store rollout videos
+     """
++    # A deterministic run directory is useful for managed, archived runs. This
++    # only changes output placement; the original timestamped behavior remains
++    # the default when ROBOCASA_RUN_DIR is unset.
++    managed_run_dir = os.environ.get("ROBOCASA_RUN_DIR")
++    if managed_run_dir:
++        base_output_dir = os.path.abspath(os.path.expanduser(managed_run_dir))
++        managed_artifacts = [
++            os.path.join(base_output_dir, name)
++            for name in ("models", "logs", "videos", "vis", "config.json")
++        ]
++        if any(os.path.exists(path) for path in managed_artifacts):
++            raise RuntimeError(
++                "managed run directory already contains training artifacts: "
++                + base_output_dir
++            )
++        os.makedirs(base_output_dir, exist_ok=True)
++
++        output_dir = None
++        if config.experiment.save.enabled:
++            output_dir = os.path.join(base_output_dir, "models")
++            os.makedirs(output_dir)
++        log_dir = os.path.join(base_output_dir, "logs")
++        video_dir = os.path.join(base_output_dir, "videos")
++        vis_dir = os.path.join(base_output_dir, "vis")
++        os.makedirs(log_dir)
++        os.makedirs(video_dir)
++        os.makedirs(vis_dir)
++        return log_dir, output_dir, video_dir, vis_dir
++
+     # timestamp for directory names
+     t_now = time.time()
+     time_str = datetime.datetime.fromtimestamp(t_now).strftime('%Y%m%d%H%M%S')

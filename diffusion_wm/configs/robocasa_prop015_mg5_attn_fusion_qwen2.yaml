@@ -1,0 +1,81 @@
+# 20260618_prop015_mg5_structured-style config with attention-fusion encoder.
+#
+# Matches the historical 20260618_prop015_mg5_structured_cuda6_save20k run
+# on data/training/backbone/action/dynamics knobs. The intentional change is
+# encoder.type=attn_fusion with 4 learned readout queries:
+#   194 fusion tokens (3 cameras * 8*8 patches + proprio + lang), width 512
+#   -> 4 readout tokens * 512
+#   -> flatten/project to latent_dim=2048.
+
+env: robocasa
+
+model:
+  latent_dim: 2048
+  action_chunk_len: 1
+
+encoder:
+  type: attn_fusion
+  d_model: 512
+  n_fusion_layers: 2
+  n_heads: 8
+  mlp_ratio: 4
+  dropout: 0.0
+  readout_queries: 4
+  # readout is now a Q-Former-style stack; defaults readout_depth=1,
+  # readout_mlp_ratio=2 -> a depth-1 block (cross-attn + SwiGLU + residual),
+  # NOT the old bare one-shot pool. Bump readout_depth to deepen.
+  use_proprio: true
+  cnn_depth: 48
+  cnn_mults: [2, 3, 4, 4]
+  cnn_kernel: 5
+  rope_theta: 10000.0
+
+sequence_model:
+  type: continuous_transformer
+  backbone_type: qwen2
+  hidden_dim: 2048
+  n_layers: 2
+  n_heads: 16
+  n_kv_heads: null
+  ffn_hidden_size: 1024
+  dropout: 0.1
+  max_context_len: 1024
+  input_norm: false
+  model_dtype: float32
+  attn_impl: sdpa
+
+action_head:
+  type: diffusion
+  denoising_steps: 20
+  time_dim: 16
+  mlp_dims: [1024, 1024, 1024]
+  residual_style: true
+
+dynamics:
+  enabled: true
+  type: film
+  action_emb: 256
+  depth: 48
+  mults: [2, 3, 4, 4]
+  kernel_size: 5
+
+# --- training-loop params (trainer CLI defaults; not model structure) ---
+filter_key: 3000_demos
+lang_emb_mode: clip
+seq_len: 10
+obs_stride: 1
+crops_per_demo: 8
+pred_next_steps: 1
+pred_next_proprio_weight: 0.15
+batch_size: 48
+max_steps: 100000
+lr: 3.0e-4
+warmup_steps: 1000
+weight_decay: 0.1
+grad_clip: 1.0
+precision: bf16
+eval_every: 20000
+save_every: 20000
+holdout_size: 30
+save_holdout_traces: true
+lang_emb_cache: ${ROBOCASA_RUN_DIR}/robocasa_mg_partial_lang_emb_cache.npz

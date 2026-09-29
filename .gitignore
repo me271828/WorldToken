@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.runtime/
+
+# experiment outputs / data — never in the code repo
+runs/
+results/
+external/
+MUJOCO_LOG.TXT
+*.pt
+*.pth
+*.hdf5
+*.h5
+*.mp4

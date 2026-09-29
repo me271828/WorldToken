@@ -1,0 +1,135 @@
+# RMBench memory-demo recipe.  This is an isolated action-only entrypoint:
+# RoboCasa datasets, trainers, environment registry, and baseline configs are
+# not imported or modified.
+
+objective: rmbench_next_qpos_diffusion_action
+env: null
+
+model:
+  latent_dim: 768
+  action_chunk_len: 8
+
+obs_spec:
+  image_keys: [head_camera, left_camera, right_camera]
+  image_hw: [240, 320]
+  image_channels: 3
+  layout: NHWC
+  low_dim_keys: [joint_action/vector]
+  low_dim_dims: [14]
+  # Stable one-hot label in RMBENCH_TASKS order.
+  lang_dim: 9
+
+action_spec:
+  dim: 14
+  discrete_dims: []
+
+# N2 structure, with an RMBench-only 20x20 patch stem shared by three cameras.
+# 240x320 -> 12x16 = 192 patches/camera, 576 image tokens/timestep.
+encoder:
+  type: rmbench_patch_latent_token
+  patch_size: 20
+  d_model: 768
+  n_fusion_layers: 2
+  n_heads: 6
+  mlp_ratio: 4
+  dropout: 0.0
+  readout_queries: 4
+  readout_depth: 1
+  readout_mlp_ratio: 2
+  use_proprio: true
+  rope_theta: 10000.0
+
+sequence_model:
+  type: continuous_transformer
+  backbone_type: qwen2
+  hidden_dim: 768
+  n_layers: 4
+  n_heads: 6
+  n_kv_heads: null
+  ffn_hidden_size: 2048
+  dropout: 0.1
+  max_context_len: 1024
+  input_norm: false
+  model_dtype: float32
+  attn_impl: sdpa
+
+# The action head receives only temporal h.  In particular, it cannot
+# cross-attend to encoder spatial tokens and bypass the one-token bottleneck.
+action_head:
+  type: diffusion_dit
+  denoising_steps: 20
+  d_model: 192
+  n_layers: 2
+  n_heads: 6
+  dim_feedforward: 768
+  activation: gelu
+  dropout: 0.0
+  h_adaln_bottleneck: false
+  use_h_cross_attn: false
+  use_obs_cross_attn: false
+
+dynamics:
+  enabled: false
+  type: none
+
+z_bottleneck:
+  dim: null
+
+dataset_root: ${RMBENCH_DATA_ROOT}
+output_dir: runs/rmbench_9task_n2_patch20_seq288
+tasks:
+  - battery_try
+  - blocks_ranking_try
+  - cover_blocks
+  - observe_and_pickup
+  - press_button
+  - put_back_block
+  - rearrange_blocks
+  - swap_T
+  - swap_blocks
+instruction_split: seen
+
+# Every sample keeps a constant four-frame physical gap.  Short episodes use
+# their complete randomly selected modulo phase; long episodes use a random
+# stride-4 window capped at 288 tokens.  The collator pads only to the longest
+# sample in the current batch (with batch_size=1, there is no padding).
+sampling_strategy: strided
+seq_len: 288
+obs_stride: 4
+recent_steps: 1
+crops_per_episode: 1
+eval_crops_per_episode: 1
+holdout_per_task: 0
+split_seed: 0
+
+lang_emb_mode: task_one_hot
+lang_emb_cache: null
+
+device: auto
+precision: bf16
+batch_size: 1
+grad_accum_steps: 8
+num_workers: 4
+persistent_workers: true
+max_open_files: 16
+
+# Reuse the confirmed N2 optimization recipe.
+max_steps: 5000
+lr: 3.0e-4
+encoder_lr: 4.25e-4
+predictor_lr: 4.25e-4
+action_head_lr: 3.0e-4
+weight_decay: 0.0
+adamw_beta1: 0.9
+adamw_beta2: 0.95
+adamw_eps: 1.0e-8
+warmup_steps: 250
+min_lr_ratio: 0.1
+grad_clip: 1.0
+log_every: 25
+eval_every: 0
+save_every: 500
+eval_batch_size: 1
+eval_num_workers: 0
+seed: 1
+save_latest_checkpoint: false

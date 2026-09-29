@@ -1,0 +1,25 @@
+# Core runtime (model + config + data IO). See pyproject.toml optional-deps for
+# train / rollout / robocasa / dev groups.
+torch
+numpy
+transformers
+diffusers
+h5py
+pyyaml
+
+# Training extras
+peft
+einops
+tqdm
+opencv-python-headless>=4.8,<5
+
+# Rollout video / eval extras
+imageio
+imageio-ffmpeg
+
+# Dev
+pytest
+ruff
+
+# RoboCasa env (robomimic / robosuite / robocasa) is NOT pinned here: it must
+# match the simulator install on the GPU host. Install separately in that env.

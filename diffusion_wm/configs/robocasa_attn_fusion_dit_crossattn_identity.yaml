@@ -1,0 +1,78 @@
+# attn_fusion encoder + identity h + DiT action head with obs-token cross-attention.
+#
+# Derived from the 20260628 h6nadaln 25k film-dynamics run. The only structural
+# change is sequence_model.type=identity, so h_t is the encoder latent z_t rather
+# than a causal Transformer output over z_{<=t}.
+#
+# action_head.obs_tokens_source can be post_fusion (default/current behavior) or
+# pre_fusion for the "DiT sees encoder before-fusion tokens" ablation.
+
+env: robocasa
+
+model:
+  latent_dim: 2048
+  action_chunk_len: 4
+
+encoder:
+  type: attn_fusion
+  d_model: 512
+  n_fusion_layers: 2
+  n_heads: 16
+  mlp_ratio: 4
+  dropout: 0.0
+  readout_queries: 1
+  readout_depth: 1
+  readout_mlp_ratio: 2
+  use_proprio: true
+  cnn_depth: 48
+  cnn_mults: [2, 3, 4, 8, 16]
+  cnn_kernel: 5
+  rope_theta: 10000.0
+
+sequence_model:
+  type: identity
+  hidden_dim: 2048
+  max_context_len: 1024
+
+action_head:
+  type: diffusion_dit
+  use_obs_cross_attn: true
+  obs_tokens_source: post_fusion
+  denoising_steps: 20
+  d_model: 256
+  n_layers: 4
+  n_heads: 8
+  dropout: 0.0
+
+dynamics:
+  enabled: true
+  type: film
+  action_emb: 256
+  depth: 48
+  mults: [2, 3, 4, 4]
+  kernel_size: 5
+
+# --- training-loop params (trainer CLI defaults; launch script pins the 25k run) ---
+filter_key: 300_demos
+lang_emb_mode: clip
+seq_len: 10
+obs_stride: 4
+crops_per_demo: 8
+pred_next_steps: 4
+pred_next_mode: terminal
+pred_next_obs_offset: 1
+pred_next_proprio_weight: 0.15
+batch_size: 48
+max_steps: 25000
+warmup_steps: 250
+lr: 3.0e-4
+min_lr_ratio: 0.1
+weight_decay: 0.1
+grad_clip: 1.0
+precision: bf16
+eval_every: 5000
+save_every: 5000
+holdout_size: 30
+eval_crops_per_demo: 128
+holdout_per_task_metrics: true
+save_holdout_traces: true
