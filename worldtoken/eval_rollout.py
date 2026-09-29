@@ -940,14 +940,19 @@ def infer_action_model(config: dict[str, Any], requested: str = "auto") -> str:
 
 
 def datasets_from_config(config: dict[str, Any]) -> list[Path]:
+    field = "hdf5_paths"
     raw = config.get("hdf5_paths")
     if raw is None:
+        field = "dataset"
         raw = config.get("dataset")
+    if raw is None and "train" in config:
+        field = "train.data"
+        raw = [item["path"] for item in config["train"]["data"]]
     if isinstance(raw, (str, Path)):
         raw = [raw]
     if not isinstance(raw, list) or not raw:
         raise ValueError("--dataset-from-config requested, but config has no non-empty hdf5_paths/dataset list")
-    return [Path(item) for item in raw]
+    return [paths.resolve_path(item, field=f"{field}[{index}]") for index, item in enumerate(raw)]
 
 
 def resolve_eval_datasets(
@@ -1055,8 +1060,9 @@ def expand_dataset_paths(dataset_args: list[Path] | None) -> list[Path]:
 
     roots = dataset_args or [paths.robocasa_data_root()]
     found: list[Path] = []
-    for root in roots:
-        root_s = str(root.expanduser())
+    for index, root in enumerate(roots):
+        root = paths.resolve_path(root, field=f"dataset[{index}]")
+        root_s = str(root)
         if any(ch in root_s for ch in "*?[]"):
             found.extend(Path(p) for p in glob.glob(root_s, recursive=True))
         elif root.is_file():
@@ -2143,6 +2149,13 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = resolve_checkpoint(run_dir, args.checkpoint).resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    # Validate data paths and environment metadata before allocating the policy.
+    source_config = load_json(run_dir / "config.json")
+    eval_datasets = resolve_eval_datasets(args.dataset, source_config, dataset_from_config=args.dataset_from_config)
+    tasks = discover_tasks(eval_datasets, task_names=args.tasks, horizon_override=args.horizon_override)
+    tasks = apply_task_horizons(tasks, args.task_horizons)
+    if args.robocasa_bc_eval_protocol:
+        tasks = apply_robocasa_bc_eval_protocol(tasks)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or (run_dir / "rollouts" / f"{checkpoint.stem}_{timestamp}")
     output_dir = output_dir.expanduser().resolve()
@@ -2183,11 +2196,6 @@ def main(argv: list[str] | None = None) -> int:
     unknown_zero_image_keys = sorted(set(zero_image_keys) - set(available_image_keys))
     if unknown_zero_image_keys:
         raise ValueError(f"unknown --zero-image-key values {unknown_zero_image_keys}; available keys: {list(available_image_keys)}")
-    eval_datasets = resolve_eval_datasets(args.dataset, config, dataset_from_config=args.dataset_from_config)
-    tasks = discover_tasks(eval_datasets, task_names=args.tasks, horizon_override=args.horizon_override)
-    tasks = apply_task_horizons(tasks, args.task_horizons)
-    if args.robocasa_bc_eval_protocol:
-        tasks = apply_robocasa_bc_eval_protocol(tasks)
     execution_task_names: frozenset[str] | None = None
     if args.execution_tasks is not None:
         execution_task_names = frozenset(str(name) for name in args.execution_tasks)

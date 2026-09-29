@@ -26,6 +26,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from worldtoken.paths import resolve_path
+
 
 # --- config / args helpers ---------------------------------------------------
 def load_yaml_defaults(path: Path | None) -> dict[str, Any]:
@@ -68,11 +70,7 @@ def expand_path_placeholders(path: Path | str | None) -> Path | None:
     s = str(path)
     if "{timestamp}" in s:
         s = s.replace("{timestamp}", time.strftime("%Y%m%d_%H%M%S"))
-    # Expand ${ENV_VAR} / $ENV_VAR so configs carry no machine-specific absolute paths.
-    s = os.path.expandvars(s)
-    if "$" in s:
-        raise ValueError(f"unresolved environment variable in path: {path!r} -> {s!r}")
-    return Path(s)
+    return resolve_path(s)
 
 
 # --- device / seeding / precision --------------------------------------------

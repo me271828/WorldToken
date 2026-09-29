@@ -391,13 +391,7 @@ def main() -> int:
     ckpt_dict = FileUtils.maybe_dict_from_checkpoint(ckpt_path=str(checkpoint))
     config = json.loads(ckpt_dict["config"])
     protocol = resolve_policy_protocol(config)
-    rollout_policy, _ = FileUtils.policy_from_checkpoint(
-        device=device,
-        ckpt_dict=ckpt_dict,
-        verbose=False,
-    )
-
-    datasets = [Path(item["path"]).expanduser().resolve() for item in config["train"]["data"]]
+    datasets = common.datasets_from_config(config)
     tasks = common.discover_tasks(
         datasets,
         task_names=args.tasks,
@@ -453,6 +447,12 @@ def main() -> int:
     print(json.dumps(json_ready(preflight), ensure_ascii=False), flush=True)
     if args.preflight_only:
         return 0
+
+    rollout_policy, _ = FileUtils.policy_from_checkpoint(
+        device=device,
+        ckpt_dict=ckpt_dict,
+        verbose=False,
+    )
 
     output_dir = (
         args.output_dir

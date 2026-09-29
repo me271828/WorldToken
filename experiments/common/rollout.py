@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True, help="Paper recipe in experiments/*/configs")
     parser.add_argument("--run-dir", type=Path, required=True, help="Trained run containing config.json")
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--data-root", type=Path, help="Resolve ${DATA_ROOT} in portable run/checkpoint configs")
     parser.add_argument("--history", type=int)
     parser.add_argument("--repeat", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--all", action="store_true", help="Run every paper context and repeat for this model")
@@ -37,7 +38,7 @@ def main() -> None:
     selected = contexts if args.all else [args.history if args.history is not None else train_history]
     if any(c not in contexts for c in selected):
         parser.error(f"Paper contexts for this recipe: {contexts}")
-    env = child_environment()
+    env = child_environment({"DATA_ROOT": str(args.data_root.expanduser().resolve())} if args.data_root else None)
     for context in selected:
         repeats = [1, 2, 3] if context == train_history else [1]
         if not args.all:

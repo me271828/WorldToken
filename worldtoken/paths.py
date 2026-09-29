@@ -18,11 +18,24 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 
 ROBOCASA_DATA_ROOT_ENV = "ROBOCASA_DATA_ROOT"
 ROBOMIMIC_SRC_ENV = "ROBOMIMIC_SRC"
 ROBOCASA_SRC_ENV = "ROBOCASA_SRC"
 ROBOCASA_RUN_DIR_ENV = "ROBOCASA_RUN_DIR"
+
+
+def resolve_path(value: Path | str, *, field: str = "path") -> Path:
+    """Expand an active filesystem path, with actionable errors for portable configs."""
+    if not str(value).strip():
+        raise ValueError(f"{field}: expected a non-empty path")
+    expanded = os.path.expandvars(str(value))
+    missing = re.findall(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z_0-9]*)", expanded)
+    if missing:
+        names = sorted({braced or bare for braced, bare in missing})
+        raise ValueError(f"{field}: set {', '.join(names)} to resolve path {str(value)!r}")
+    return Path(expanded).expanduser()
 
 
 def _require_env_path(var: str, *, what: str) -> Path:
@@ -32,12 +45,12 @@ def _require_env_path(var: str, *, what: str) -> Path:
             f"{what} is not configured: set the {var} environment variable "
             f"(this repo assumes no machine-specific default path)."
         )
-    return Path(value).expanduser()
+    return resolve_path(value, field=var)
 
 
 def _optional_env_path(var: str) -> Path | None:
     value = os.environ.get(var, "").strip()
-    return Path(value).expanduser() if value else None
+    return resolve_path(value, field=var) if value else None
 
 
 def robocasa_data_root() -> Path:
