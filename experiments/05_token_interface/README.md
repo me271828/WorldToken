@@ -14,10 +14,10 @@ registry accepts that interface without changing checkpoint tensor names.
 
 ```bash
 python -m experiments.common.train --list --section 05
-CONFIG=experiments/05_token_interface/configs/multitoken_d300_n2_k4_nodyn_seed0_30k_cuda5.json
+CONFIG=experiments/05_token_interface/configs/multitoken_n2_k4_d300_seed0.json
 python -m experiments.common.train --config "$CONFIG" \
   --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" --processes 1 --micro-batch 48
-RUN="$RUNS_ROOT/05_token_interface/multitoken_d300_n2_k4_nodyn_seed0_30k_cuda5"
+RUN="$RUNS_ROOT/05_token_interface/multitoken_n2_k4_d300_seed0"
 python -m experiments.common.rollout --config "$CONFIG" \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00030000.pt" --all
 ```

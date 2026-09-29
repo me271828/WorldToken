@@ -23,7 +23,7 @@ Set up the [environment](../../environments/README.md) and run the shared data
 preparation command in the root README. For one example:
 
 ```bash
-CONFIG=experiments/04_robocasa_scaling/configs/phase1grid_d50_n1_nodyn_seed0_5k_cuda6.json
+CONFIG=experiments/04_robocasa_scaling/configs/scaling_n1_d50_seed0.json
 python -m experiments.common.train --config "$CONFIG" \
   --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" --processes 1 --micro-batch 48
 ```
@@ -46,7 +46,7 @@ original start frames and iteration order.
 For a trained example:
 
 ```bash
-RUN="$RUNS_ROOT/04_robocasa_scaling/phase1grid_d50_n1_nodyn_seed0_5k_cuda6"
+RUN="$RUNS_ROOT/04_robocasa_scaling/scaling_n1_d50_seed0"
 python -m worldtoken.eval_holdout_rmse \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt"
 python -m experiments.common.rollout --config "$CONFIG" \
@@ -68,7 +68,7 @@ Install the pinned robomimic source and apply `baseline/robomimic.patch` as
 described in the environment README. Train with:
 
 ```bash
-BC_CONFIG=experiments/04_robocasa_scaling/configs/e0_bc_xfmr_mg23_d300_seed123_official500k_cuda4.json
+BC_CONFIG=experiments/04_robocasa_scaling/configs/bc_transformer_d300_seed123.json
 python -m experiments.common.train --config "$BC_CONFIG" --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT"
 ```
 

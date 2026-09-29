@@ -21,10 +21,10 @@ This result has two experiments.
 
 ```bash
 python -m experiments.common.train --list --section 06
-CONFIG=experiments/06_recent_history/configs/e2_d300_n3_nodyn_seq1_seed0_30k_cuda0.json
+CONFIG=experiments/06_recent_history/configs/history_n3_c1_d300_seed0.json
 python -m experiments.common.train --config "$CONFIG" \
   --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" --processes 1 --micro-batch 48
-RUN="$RUNS_ROOT/06_recent_history/e2_d300_n3_nodyn_seq1_seed0_30k_cuda0"
+RUN="$RUNS_ROOT/06_recent_history/history_n3_c1_d300_seed0"
 python -m experiments.common.rollout --config "$CONFIG" \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00030000.pt" --all
 ```

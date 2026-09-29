@@ -39,7 +39,7 @@ to the expert-demonstration root and `RUNS_ROOT` to the training output root.
 Prepare the initialization command without opening data:
 
 ```bash
-INIT_CONFIG=experiments/07_long_history_rmbench/configs/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4.json
+INIT_CONFIG=experiments/07_long_history_rmbench/configs/rmbench_init_n2_c288_seed1.json
 python -m experiments.common.train --config "$INIT_CONFIG" \
   --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" --prepare-only
 ```

@@ -30,7 +30,7 @@ from worldtoken.train_rmbench import (
 )
 
 
-CONFIG = Path(__file__).resolve().parents[2] / "experiments/07_long_history_rmbench/configs/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4.json"
+CONFIG = Path(__file__).resolve().parents[2] / "experiments/07_long_history_rmbench/configs/rmbench_init_n2_c288_seed1.json"
 
 
 def test_rmbench_config_is_n2_without_action_spatial_bypass() -> None:

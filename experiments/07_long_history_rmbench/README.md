@@ -20,10 +20,10 @@ indices are 6, 15, 19, 25 and 46 (split seed 4). The continuation recipe contain
 the left-descent corridor loss settings used in the paper.
 
 ```bash
-INIT_CONFIG=experiments/07_long_history_rmbench/configs/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4.json
-FINAL_CONFIG=experiments/07_long_history_rmbench/configs/e4_blocks_ranking_n2_seq608_seed1_step5500.json
-INIT_RUN="$RUNS_ROOT/07_long_history_rmbench/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4"
-FINAL_RUN="$RUNS_ROOT/07_long_history_rmbench/e4_blocks_ranking_n2_seq608_seed1_step5500"
+INIT_CONFIG=experiments/07_long_history_rmbench/configs/rmbench_init_n2_c288_seed1.json
+FINAL_CONFIG=experiments/07_long_history_rmbench/configs/rmbench_ranking_modified_n2_c608_seed1.json
+INIT_RUN="$RUNS_ROOT/07_long_history_rmbench/rmbench_init_n2_c288_seed1"
+FINAL_RUN="$RUNS_ROOT/07_long_history_rmbench/rmbench_ranking_modified_n2_c608_seed1"
 python -m experiments.common.train --config "$INIT_CONFIG" --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT"
 python -m experiments.common.train --config "$FINAL_CONFIG" --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" \
   --init-checkpoint "$INIT_RUN/checkpoint_step_00005000.pt"

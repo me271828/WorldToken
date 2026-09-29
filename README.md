@@ -151,13 +151,16 @@ the recorded global batch size when changing process count or microbatch size.
 
 ```bash
 python -m experiments.common.train \
-  --config experiments/04_robocasa_scaling/configs/phase1grid_d50_n1_nodyn_seed0_5k_cuda6.json \
+  --config experiments/04_robocasa_scaling/configs/scaling_n1_d50_seed0.json \
   --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" \
   --processes 1 --micro-batch 48
 ```
 
 Add `--prepare-only` to write the resolved configuration and print its command.
-Run names match the records dataset; their GPU suffixes do not select devices.
+Recipe filenames, run names and output directories use the public run names
+in the records dataset (for example, `scaling_n2_d300_seed0`). Each records
+run's `run_info.json` preserves `original_run_name` for tracing historical
+training artifacts; those archived names and artifacts remain unchanged.
 Use `CUDA_VISIBLE_DEVICES` and `--processes` to select your hardware.
 
 For RoboCasa, use the shared [rollout launcher](experiments/common/rollout.py),
