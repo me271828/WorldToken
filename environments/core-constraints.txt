@@ -4,13 +4,11 @@ torchvision==0.19.1
 numpy==1.23.5
 transformers==4.57.6
 diffusers==0.34.0
-peft==0.15.2
 h5py==3.11.0
 scipy==1.11.4
 opencv-python-headless==4.8.1.78
 imageio==2.37.4
 imageio-ffmpeg==0.6.0
 PyYAML==6.0.3
-einops==0.8.2
 accelerate==1.14.0
 safetensors==0.8.0

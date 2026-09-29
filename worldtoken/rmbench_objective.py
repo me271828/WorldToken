@@ -110,13 +110,6 @@ def rmbench_action_objective(
             )
 
     if bool(selected.any()):
-        conditioning: dict[str, torch.Tensor] = {}
-        if bool(getattr(raw_model.action_head, "needs_obs_tokens", False)):
-            conditioning["obs_tokens"] = outputs["obs_tokens"][selected]
-        if bool(getattr(raw_model.action_head, "needs_world_history", False)):
-            world_tokens, world_token_mask = raw_model.past_world_context(outputs["z"])
-            conditioning["world_tokens"] = world_tokens[selected]
-            conditioning["world_token_mask"] = world_token_mask[selected]
         hidden_selected = hidden[selected]
         actions_selected = actions_chunk[selected]
         weights_selected = (
@@ -156,13 +149,9 @@ def rmbench_action_objective(
                 f"action_loss_chunk_size must be >= 0, got {action_loss_chunk_size}"
             )
         chunk_size = selected_count if chunk_size == 0 else chunk_size
-        conditioning_keys = tuple(conditioning)
         chunk_losses: list[torch.Tensor] = []
         for start in range(0, selected_count, chunk_size):
             stop = min(selected_count, start + chunk_size)
-            conditioning_chunk = tuple(
-                conditioning[key][start:stop] for key in conditioning_keys
-            )
 
             def loss_chunk(
                 hidden_chunk: torch.Tensor,
@@ -173,12 +162,8 @@ def rmbench_action_objective(
                 left_descent_directions_chunk: torch.Tensor,
                 left_descent_extra_directions_chunk: torch.Tensor,
                 left_descent_valid_chunk: torch.Tensor,
-                *conditioning_values: torch.Tensor,
             ) -> torch.Tensor:
-                kwargs = {
-                    key: value
-                    for key, value in zip(conditioning_keys, conditioning_values)
-                }
+                kwargs = {}
                 if weights_chunk.numel() != 0:
                     kwargs["loss_weights"] = weights_chunk
                 if downward_directions_chunk.numel() != 0:
@@ -259,7 +244,6 @@ def rmbench_action_objective(
                     if left_descent_valid_selected is None
                     else left_descent_valid_selected[start:stop]
                 ),
-                *conditioning_chunk,
             )
             if (
                 bool(checkpoint_action_loss)

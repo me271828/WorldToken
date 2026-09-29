@@ -35,12 +35,10 @@ if __package__ is None or __package__ == "":
 
 from worldtoken import paths
 from worldtoken.train_utils import (
-    _image_float_to_uint8_np,
     append_jsonl,
     json_ready,
     select_device,
     write_json,
-    write_prediction_trace_h5,
 )
 from worldtoken.envs.robocasa_rollout import (
     ClipLangEmbeddingProvider,
@@ -58,11 +56,6 @@ from worldtoken.envs.robocasa import (
     ROBOCASA_IMAGE_KEYS,
     ROBOCASA_LANG_EMB_DIM,
     ROBOCASA_LOW_DIM_KEYS,
-)
-from worldtoken.envs.robocasa_success_diagnostics import (
-    PlacementDiagnosticAccumulator,
-    placement_diagnostic_summary,
-    robocasa_placement_success_components,
 )
 
 
@@ -221,16 +214,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "this stays deterministic."
         ),
     )
-    parser.add_argument(
-        "--save-rollout-traces",
-        type=int,
-        default=0,
-        help=(
-            "Save an H5 prediction trace (observed + predicted, "
-            "every frame) for episode_idx < N per task in each split. Render with "
-            "worldtoken.make_robocasa_holdout_grid_video."
-        ),
-    )
     parser.add_argument("--zero-lang-emb", action="store_true", help="Ablation: feed zero language embeddings to the policy.")
     parser.add_argument("--zero-proprio", action="store_true", help="Ablation: feed zero proprio vectors to the policy.")
     parser.add_argument(
@@ -242,16 +225,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--video-skip", type=int, default=5)
     parser.add_argument("--allow-dummy-lang", action="store_true")
     parser.add_argument("--terminate-on-success", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument(
-        "--placement-success-diagnostics",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Diagnostic only: for RoboCasa PnP and mug-placement tasks, record the "
-            "exact task-specific placement predicate separately from the canonical "
-            "gripper_obj_far condition. Canonical success and termination are unchanged."
-        ),
-    )
     parser.add_argument(
         "--env-backend",
         choices=("worker", "direct"),
@@ -1196,8 +1169,6 @@ class RoboCasaRolloutPolicy:
         zero_lang_emb: bool = False,
         zero_proprio: bool = False,
         zero_image_keys: tuple[str, ...] = (),
-        trace_action_prefix_len: int = 1,
-        trace_target_offset: int = 1,
     ) -> None:
         self.model = model
         self.device = device
@@ -1226,8 +1197,6 @@ class RoboCasaRolloutPolicy:
             raise ValueError(
                 f"warmup_pad_len must be in [0, seq_len={self.seq_len}], got {self.warmup_pad_len}"
             )
-        self.trace_action_prefix_len = max(1, int(trace_action_prefix_len))
-        self.trace_target_offset = max(1, int(trace_target_offset))
         self.image_keys = tuple(image_keys)
         self.zero_lang_emb = bool(zero_lang_emb)
         self.zero_proprio = bool(zero_proprio)
@@ -1240,15 +1209,8 @@ class RoboCasaRolloutPolicy:
         self._action_queue: list[torch.Tensor] = []
         self._env_step_index = 0
         self.generator: torch.Generator | None = None
-        # When capture_trace is on, __call__ decodes the action-conditioned next-obs
-        # prediction, stashing them in last_capture for the rollout loop to log.
-        self.capture_trace = False
-        self.last_capture: dict[str, Any] | None = None
         self.reset_action_stats()
 
-    def set_capture(self, enabled: bool) -> None:
-        self.capture_trace = bool(enabled)
-        self.last_capture = None
 
     def reset_action_stats(self) -> None:
         self.action_abs_max = 0.0
@@ -1270,7 +1232,6 @@ class RoboCasaRolloutPolicy:
         self.history = []
         self._action_queue = []
         self._env_step_index = 0
-        self.last_capture = None
         gen_device = self.device if self.device.type == "cuda" else torch.device("cpu")
         self.generator = torch.Generator(device=gen_device).manual_seed(int(seed))
         self.reset_action_stats()
@@ -1329,64 +1290,6 @@ class RoboCasaRolloutPolicy:
             lang.zero_()
         return images, proprio, lang
 
-    @torch.no_grad()
-    def _capture_prediction(
-        self, outputs: dict[str, Any], h_last: torch.Tensor, action_prefix: torch.Tensor
-    ) -> dict[str, Any]:
-        """Decode the action-conditioned future-observation prediction for h[-1].
-
-        ``action_prefix`` is the raw action prefix sampled at the current observation
-        token. For 5 Hz runs this is typically four 20 Hz actions and predicts the
-        next 5 Hz observation token. The trace writer shifts the predicted stream by
-        ``trace_target_offset`` token(s), matching the training holdout alignment.
-        """
-        if action_prefix.ndim != 2 or action_prefix.shape[-1] != self.action_dim:
-            raise ValueError(
-                f"trace action_prefix must be [K,{self.action_dim}], got {tuple(action_prefix.shape)}"
-            )
-        action_prefix_btk = action_prefix.view(1, 1, int(action_prefix.shape[0]), self.action_dim)
-        action_for_dec = self.model._encode_action_for_decoder(action_prefix_btk)
-        pred_decoder = self.model.pred_decoder
-        decode = getattr(pred_decoder, "decode_with_action_prefix", None)
-        if callable(decode):
-            decoded = decode(h_last, action_for_dec)
-        else:
-            predict_next = getattr(pred_decoder, "predict_next", None)
-            if callable(predict_next):
-                base_images = {
-                    key: torch.from_numpy(self.history[-1]["images"][key][None]).to(
-                        device=self.device, dtype=torch.uint8
-                    )
-                    for key in self.image_keys
-                }
-                decoded_flat = predict_next(
-                    self.model,
-                    h_last.reshape(-1, h_last.shape[-1]),
-                    base_images,
-                    action_for_dec.reshape(-1, int(action_for_dec.shape[2]), action_for_dec.shape[-1]),
-                )
-                decoded = {
-                    "images": {
-                        key: value.reshape(1, 1, *value.shape[1:])
-                        for key, value in decoded_flat["images"].items()
-                    },
-                    "proprio": decoded_flat["proprio"].reshape(1, 1, *decoded_flat["proprio"].shape[1:]),
-                    "lang_emb": decoded_flat["lang_emb"].reshape(1, 1, *decoded_flat["lang_emb"].shape[1:]),
-                }
-            else:
-                if int(action_for_dec.shape[2]) != 1:
-                    raise AttributeError(
-                        f"{type(pred_decoder).__name__} must expose decode_with_action_prefix() or "
-                        "predict_next() for multi-action rollout traces"
-                    )
-                decoded = pred_decoder(h_last, action_for_dec[:, :, 0])
-        predicted = {key: _image_float_to_uint8_np(decoded["images"][key][0, 0]) for key in self.image_keys}
-        return {
-            "predicted": predicted,
-            "action_prefix": action_prefix.detach().cpu().float().numpy().astype(np.float32),
-            "target_offset": int(self.trace_target_offset),
-            "obs_stride": int(self.obs_stride),
-        }
 
     def _accumulate_action_stats(self, action_np: np.ndarray) -> None:
         self.action_abs_max = max(self.action_abs_max, float(np.abs(action_np).max(initial=0.0)))
@@ -1402,9 +1305,7 @@ class RoboCasaRolloutPolicy:
         append_obs = self.obs_stride <= 1 or not self.history or (self._env_step_index % self.obs_stride == 0)
         if append_obs:
             self._append_obs(obs)
-        # Run the encoder/predictor only when we need a fresh chunk. Rollout traces
-        # are captured on these observation-token boundaries, using the same action
-        # prefix / target offset semantics as the training holdout trace.
+        # Run the encoder/predictor only when we need a fresh chunk.
         need_forward = not self._action_queue
         outputs: dict[str, Any] | None = None
         h_last: torch.Tensor | None = None
@@ -1412,26 +1313,14 @@ class RoboCasaRolloutPolicy:
             images, proprio, lang = self._batch_tensors()
             outputs = self.model(images, proprio, lang, run_prediction=True)
             h_last = outputs["h"][:, -1:, :]
-        sampled_prefix: torch.Tensor | None = None
         if not self._action_queue:
-            # Cross-attn heads consume either the last step's encoder obs tokens
-            # or its strictly-past world-token memory.
-            chunk_kwargs = {}
-            if outputs is not None and "obs_tokens" in outputs:
-                chunk_kwargs["obs_tokens"] = outputs["obs_tokens"][:, -1:]
-            if bool(getattr(getattr(self.model, "action_head", None), "needs_world_history", False)):
-                world_tokens, world_token_mask = self.model.past_world_context(outputs["z"])
-                chunk_kwargs["world_tokens"] = world_tokens[:, -1:]
-                chunk_kwargs["world_token_mask"] = world_token_mask[:, -1:]
             chunk = self.model.sample_action_chunk(
                 h_last,
                 deterministic=self.diffusion_deterministic,
                 generator=self.generator,
                 num_samples=self.action_mean_samples,
-                **chunk_kwargs,
             )[0, 0]  # [H, 12]
             n_exec = max(1, min(self.execute_horizon, int(chunk.shape[0])))
-            sampled_prefix = chunk[:n_exec]
             self._action_queue = [chunk[i] for i in range(n_exec)]
         action_t = self._action_queue.pop(0)  # [12]
         action_np = action_t.detach().cpu().float().numpy().astype(np.float32)
@@ -1440,22 +1329,6 @@ class RoboCasaRolloutPolicy:
         if not np.isfinite(action_np).all():
             raise FloatingPointError(f"sampled action contains non-finite values: {action_np}")
         self._accumulate_action_stats(action_np)
-        if (
-            self.capture_trace
-            and sampled_prefix is not None
-            and outputs is not None
-            and h_last is not None
-            and getattr(self.model, "pred_decoder", None) is not None
-        ):
-            prefix_len = int(self.trace_action_prefix_len)
-            if prefix_len > int(sampled_prefix.shape[0]):
-                raise ValueError(
-                    f"trace_action_prefix_len={prefix_len} exceeds sampled execute prefix "
-                    f"length={int(sampled_prefix.shape[0])}"
-                )
-            self.last_capture = self._capture_prediction(outputs, h_last, sampled_prefix[:prefix_len])
-        elif self.capture_trace:
-            self.last_capture = None
         self._env_step_index += 1
         return action_np
 
@@ -1586,11 +1459,6 @@ def _env_worker_main(
                 action = np.asarray(msg["action"], dtype=np.float32)
                 obs, reward, done, info = env.step(action)
                 success = info.get("is_success", {}) if isinstance(info, dict) else {}
-                placement_diagnostics = (
-                    robocasa_placement_success_components(env, task.env_name)
-                    if bool(msg.get("placement_success_diagnostics", False))
-                    else None
-                )
                 conn.send(
                     {
                         "ok": True,
@@ -1598,7 +1466,6 @@ def _env_worker_main(
                         "reward": float(np.asarray(reward).mean()),
                         "done": bool(done),
                         "success": success,
-                        "placement_diagnostics": placement_diagnostics,
                     }
                 )
             elif cmd == "close":
@@ -1655,9 +1522,7 @@ class EnvWorker:
     def step(
         self,
         action: np.ndarray,
-        *,
-        placement_success_diagnostics: bool = False,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         action_arr = np.asarray(action, dtype=np.float32)
         self.last_step_action_summary = {
             "shape": list(action_arr.shape),
@@ -1670,9 +1535,6 @@ class EnvWorker:
             {
                 "cmd": "step",
                 "action": action_arr,
-                "placement_success_diagnostics": bool(
-                    placement_success_diagnostics
-                ),
             }
         )
 
@@ -1705,155 +1567,6 @@ def write_video(path: Path, frames: list[np.ndarray], *, fps: int = 20) -> None:
         writer.close()
 
 
-class RolloutTraceCollector:
-    """Accumulate per-observation-token frames for one episode.
-
-    Streams are indexed by the model's visual token time, not every raw 20 Hz env
-    step. For 5 Hz strided runs, ``frame_index`` advances by ``obs_stride``:
-    ``observed[j]`` is the real env obs at raw frame ``j * obs_stride`` and
-    ``predicted[j]`` is the action-prefix prediction made at token j. The writer
-    shifts ``predicted`` by ``target_offset`` token(s), like holdout traces.
-    """
-
-    def __init__(self, image_keys: tuple[str, ...]) -> None:
-        self.image_keys = tuple(image_keys)
-        self.observed: dict[str, list[np.ndarray]] = {key: [] for key in self.image_keys}
-        self.predicted: dict[str, list[np.ndarray]] = {key: [] for key in self.image_keys}
-        self.actions: list[np.ndarray] = []
-        self.action_prefixes: list[np.ndarray] = []
-        self.target_offset: int | None = None
-        self.obs_stride: int | None = None
-
-    def add(self, *, obs_u8: dict[str, np.ndarray], capture: dict[str, Any], action: np.ndarray) -> None:
-        if capture is None:
-            raise RuntimeError("trace collector add() called but policy produced no capture")
-        target_offset = int(capture.get("target_offset", 1))
-        obs_stride = int(capture.get("obs_stride", 1))
-        if target_offset < 1:
-            raise ValueError(f"trace target_offset must be >= 1, got {target_offset}")
-        if obs_stride < 1:
-            raise ValueError(f"trace obs_stride must be >= 1, got {obs_stride}")
-        if self.target_offset is None:
-            self.target_offset = target_offset
-        elif self.target_offset != target_offset:
-            raise ValueError(f"trace target_offset changed within episode: {self.target_offset} -> {target_offset}")
-        if self.obs_stride is None:
-            self.obs_stride = obs_stride
-        elif self.obs_stride != obs_stride:
-            raise ValueError(f"trace obs_stride changed within episode: {self.obs_stride} -> {obs_stride}")
-        for key in self.image_keys:
-            self.observed[key].append(np.ascontiguousarray(obs_u8[key], dtype=np.uint8))
-            self.predicted[key].append(capture["predicted"][key])
-        self.actions.append(np.asarray(action, dtype=np.float32).reshape(-1))
-        self.action_prefixes.append(np.asarray(capture["action_prefix"], dtype=np.float32))
-
-    def __len__(self) -> int:
-        return len(self.actions)
-
-
-def trace_obs_images(obs: dict[str, Any], image_keys: tuple[str, ...]) -> dict[str, np.ndarray]:
-    if "images" in obs:
-        return {key: np.ascontiguousarray(np.asarray(obs["images"][key], dtype=np.uint8)) for key in image_keys}
-    return obs_images_to_uint8_hwc(obs, image_keys=image_keys)
-
-
-def write_rollout_prediction_trace(
-    collector: RolloutTraceCollector,
-    *,
-    path: Path,
-    task: TaskSpec,
-    episode_idx: int,
-    global_episode_id: int | None,
-    lang: str,
-    success: bool,
-    crashed: bool,
-    global_step: int | None,
-    action_sampling: dict[str, Any],
-    seed: int,
-) -> Path:
-    """Write a closed-loop rollout trace in the same H5 schema as the training
-    holdout trace, so ``worldtoken.make_robocasa_holdout_grid_video`` renders it
-    unchanged (observed / predicted columns per camera)."""
-    T = len(collector)
-    if T == 0:
-        raise ValueError("cannot write an empty rollout trace")
-    image_keys = collector.image_keys
-    target_offset = int(collector.target_offset or 1)
-    obs_stride = int(collector.obs_stride or 1)
-    if target_offset >= T:
-        raise ValueError(f"trace target_offset={target_offset} must be < collected token count T={T}")
-
-    rgb_true: dict[str, np.ndarray] = {}
-    rgb_predicted: dict[str, np.ndarray] = {}
-    pred_image_mse: dict[str, np.ndarray] = {}
-    for key in image_keys:
-        true_u8 = np.stack(collector.observed[key], axis=0)
-        pred_u8 = np.stack(collector.predicted[key], axis=0)
-        # predicted[j] was made at token j for token j+target_offset.
-        pred_aligned = np.zeros_like(true_u8)
-        pred_aligned[target_offset:] = pred_u8[:-target_offset]
-        rgb_true[key] = true_u8
-        rgb_predicted[key] = pred_aligned
-
-        true_f = true_u8.astype(np.float32) / 255.0
-        pmse = np.full((T,), np.nan, dtype=np.float32)
-        pred_f = pred_aligned[target_offset:].astype(np.float32) / 255.0
-        pmse[target_offset:] = ((pred_f - true_f[target_offset:]) ** 2).mean(axis=(1, 2, 3))
-        pred_image_mse[key] = pmse
-
-
-    meta = {
-        "global_step": int(global_step) if global_step is not None else 0,
-        "seq_len": int(T),
-        "objective": "robocasa_closed_loop_rollout",
-        "prediction_mode": "closed_loop_sampled_action_then_conditioned_decode",
-        "action_sampling": dict(action_sampling),
-        "action_model": str(action_sampling["action_model"]),
-        "action_sampling_seed": int(seed),
-        "image_keys": list(image_keys),
-        "action_dim": ROBOCASA_ACTION_DIM,
-        "task": task.env_name,
-        "hdf5_path": str(task.hdf5_path),
-        "episode_idx": int(episode_idx),
-        "global_episode_id": None if global_episode_id is None else int(global_episode_id),
-        "lang": str(lang),
-        "success": bool(success),
-        "crashed": bool(crashed),
-        "obs_stride": int(obs_stride),
-        "trace_action_prefix_len": int(np.stack(collector.action_prefixes, axis=0).shape[1]),
-        "trace_target_offset": int(target_offset),
-        "trace_frame_units": "observation_tokens",
-        "mse_space": "uint8_quantized_0_1",
-        "alignment": (
-            "Closed-loop rollout. rgb/<cam>[j] is the real env obs token at raw "
-            "frame j*obs_stride. "
-            "rgb_predicted/<cam>[j] is the action-prefix prediction made at "
-            "j-trace_target_offset for j; warmup frames are black. pred_image_mse "
-            "is computed in uint8-quantized [0,1] space under the policy's own state "
-            "distribution."
-        ),
-    }
-
-    warmup = np.zeros((T,), dtype=np.bool_)
-    warmup[:target_offset] = True
-    action_sampled = np.stack(collector.actions, axis=0)
-    action_sampled_chunk = np.stack(collector.action_prefixes, axis=0)
-    return write_prediction_trace_h5(
-        path,
-        image_keys=image_keys,
-        rgb_true=rgb_true,
-        rgb_predicted=rgb_predicted,
-        pred_image_mse=pred_image_mse,
-        action_sampled=action_sampled,
-        valid_mask=np.ones((T,), dtype=np.bool_),
-        frame_index=np.arange(T, dtype=np.int32) * int(obs_stride),
-        text=[str(lang)] * T,
-        warmup=warmup,
-        meta=meta,
-        extra_datasets={"action_sampled_chunk": action_sampled_chunk},
-    )
-
-
 def run_episode(
     *,
     env: Any,
@@ -1870,26 +1583,17 @@ def run_episode(
     action_high: np.ndarray | None = None,
     action_scale: float = 1.0,
     action_bound_margin: float = 0.0,
-    capture_trace: bool = False,
-    placement_success_diagnostics: bool = False,
-) -> tuple[dict[str, Any], list[np.ndarray], RolloutTraceCollector | None]:
+) -> tuple[dict[str, Any], list[np.ndarray]]:
     obs = env.reset()
     ep_meta = extract_robocasa_episode_meta(env)
     lang = getattr(env, "_ep_lang_str", ep_meta.get("lang", "dummy"))
-    policy.set_capture(capture_trace)
     policy.start_episode(lang=lang, seed=seed)
     if action_low is None or action_high is None:
         action_low, action_high = get_env_action_bounds(env)
 
     frames: list[np.ndarray] = []
-    collector = RolloutTraceCollector(policy.image_keys) if capture_trace else None
     total_reward = 0.0
     success = False
-    placement_accumulator = (
-        PlacementDiagnosticAccumulator(task.env_name)
-        if placement_success_diagnostics
-        else None
-    )
     start = time.time()
     steps = 0
 
@@ -1897,12 +1601,6 @@ def run_episode(
         if capture_video and step % max(1, int(video_skip)) == 0:
             frames.append(frame_from_obs(obs, policy.image_keys))
         raw_action = policy(obs)
-        if collector is not None and policy.last_capture is not None:
-            collector.add(
-                obs_u8=trace_obs_images(obs, policy.image_keys),
-                capture=policy.last_capture,
-                action=raw_action,
-            )
         env_action = clip_action_for_env(
             raw_action,
             action_low=action_low,
@@ -1918,12 +1616,6 @@ def run_episode(
         is_success = info.get("is_success", {}) if isinstance(info, dict) else {}
         strict_success_step = bool(is_success.get("task", False))
         success = bool(success or strict_success_step)
-        if placement_accumulator is not None:
-            placement_accumulator.update(
-                robocasa_placement_success_components(env, task.env_name),
-                strict_success_step=strict_success_step,
-                step=steps,
-            )
         if bool(done) or (terminate_on_success and success):
             break
 
@@ -1946,14 +1638,7 @@ def run_episode(
     }
     row.update(episode_meta_row_fields(task.env_name, ep_meta))
     row.update(policy.action_stats())
-    if placement_accumulator is not None:
-        row.update(
-            placement_accumulator.row_fields(
-                strict_success=success,
-                crashed=False,
-            )
-        )
-    return row, frames, collector
+    return row, frames
 
 
 def run_episode_worker(
@@ -1970,23 +1655,14 @@ def run_episode_worker(
     action_clip: str = "env",
     action_scale: float = 1.0,
     action_bound_margin: float = 0.0,
-    capture_trace: bool = False,
-    placement_success_diagnostics: bool = False,
-) -> tuple[dict[str, Any], list[np.ndarray], RolloutTraceCollector | None]:
+) -> tuple[dict[str, Any], list[np.ndarray]]:
     frames: list[np.ndarray] = []
-    collector = RolloutTraceCollector(policy.image_keys) if capture_trace else None
     total_reward = 0.0
     success = False
-    placement_accumulator = (
-        PlacementDiagnosticAccumulator(task.env_name)
-        if placement_success_diagnostics
-        else None
-    )
     start = time.time()
     steps = 0
     lang = "dummy"
     ep_meta: dict[str, Any] | None = None
-    policy.set_capture(capture_trace)
     policy.history = []
     policy.reset_action_stats()
 
@@ -2013,19 +1689,12 @@ def run_episode_worker(
         }
         row.update(episode_meta_row_fields(task.env_name, ep_meta))
         row.update(policy.action_stats())
-        if placement_accumulator is not None:
-            row.update(
-                placement_accumulator.row_fields(
-                    strict_success=False,
-                    crashed=True,
-                )
-            )
         return row
 
     try:
         reset_resp = worker.reset(seed=seed)
     except RuntimeError as exc:
-        return crash_row(exc, phase="reset", step_idx=None), frames, collector
+        return crash_row(exc, phase="reset", step_idx=None), frames
 
     obs = reset_resp["obs"]
     ep_meta = reset_resp.get("episode_meta") if isinstance(reset_resp.get("episode_meta"), dict) else {}
@@ -2038,12 +1707,6 @@ def run_episode_worker(
         if capture_video and step % max(1, int(video_skip)) == 0:
             frames.append(frame_from_obs(obs, policy.image_keys))
         raw_action = policy(obs)
-        if collector is not None and policy.last_capture is not None:
-            collector.add(
-                obs_u8=trace_obs_images(obs, policy.image_keys),
-                capture=policy.last_capture,
-                action=raw_action,
-            )
         env_action = clip_action_for_env(
             raw_action,
             action_low=action_low,
@@ -2056,23 +1719,16 @@ def run_episode_worker(
         try:
             step_resp = worker.step(
                 env_action,
-                placement_success_diagnostics=placement_success_diagnostics,
             )
         except RuntimeError as exc:
             steps = step + 1
-            return crash_row(exc, phase="step", step_idx=step), frames, collector
+            return crash_row(exc, phase="step", step_idx=step), frames
         obs = step_resp["obs"]
         steps = step + 1
         total_reward += float(step_resp.get("reward", 0.0))
         is_success = step_resp.get("success", {})
         strict_success_step = bool(is_success.get("task", False))
         success = bool(success or strict_success_step)
-        if placement_accumulator is not None:
-            placement_accumulator.update(
-                step_resp.get("placement_diagnostics"),
-                strict_success_step=strict_success_step,
-                step=steps,
-            )
         if bool(step_resp.get("done", False)) or (terminate_on_success and success):
             break
 
@@ -2095,14 +1751,7 @@ def run_episode_worker(
     }
     row.update(episode_meta_row_fields(task.env_name, ep_meta))
     row.update(policy.action_stats())
-    if placement_accumulator is not None:
-        row.update(
-            placement_accumulator.row_fields(
-                strict_success=success,
-                crashed=False,
-            )
-        )
-    return row, frames, collector
+    return row, frames
 
 
 def wilson_ci(successes: int, total: int, z: float = 1.959963984540054) -> tuple[float, float]:
@@ -2204,9 +1853,6 @@ def summarize_episodes(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "per_task_style": summarize_by_fields(rows, ("task", "style_id")),
         "per_task_layout_style": summarize_by_fields(rows, ("task", "layout_style_id")),
     }
-    placement_summary = placement_diagnostic_summary(rows)
-    if placement_summary is not None:
-        summary["placement_success_diagnostics"] = placement_summary
     return summary
 
 
@@ -2241,14 +1887,11 @@ def run_suite(
     action_sampling: dict[str, Any],
     execute_horizon: int,
     obs_stride: int,
-    trace_action_prefix_len: int,
-    trace_target_offset: int,
     seed: int,
     video_skip: int,
     render_smoke_video: bool,
     save_failure_videos: int,
     save_videos_per_task: int,
-    save_rollout_traces: int,
     terminate_on_success: bool,
     env_backend: str,
     action_clip: str,
@@ -2264,7 +1907,6 @@ def run_suite(
     zero_lang_emb: bool = False,
     zero_proprio: bool = False,
     zero_image_keys: tuple[str, ...] = (),
-    placement_success_diagnostics: bool = False,
     execution_task_names: frozenset[str] | None = None,
     policy_factory: Any = RoboCasaRolloutPolicy,
 ) -> dict[str, Any]:
@@ -2333,8 +1975,6 @@ def run_suite(
                 diffusion_deterministic=bool(action_sampling.get("deterministic", True)),
                 execute_horizon=execute_horizon,
                 obs_stride=obs_stride,
-                trace_action_prefix_len=trace_action_prefix_len,
-                trace_target_offset=trace_target_offset,
                 zero_lang_emb=zero_lang_emb,
                 zero_proprio=zero_proprio,
                 zero_image_keys=zero_image_keys,
@@ -2344,16 +1984,10 @@ def run_suite(
                 save_task_video = split == "full" and ep_idx < int(save_videos_per_task)
                 capture_failure_video = split == "full" and failures_saved < int(save_failure_videos)
                 capture_video = bool(render_smoke_video and split == "smoke") or save_task_video or capture_failure_video
-                # Prediction traces are captured for the first N episodes of
-                # each task in both splits (one knob covers "smoke a few" + "full
-                # first N"); for strided-observation runs this records model
-                # observation tokens, not every raw env frame.
-                capture_trace = ep_idx < int(save_rollout_traces)
                 if env_backend == "worker":
                     worker_episode_attempts = max(1, int(os.environ.get("ROBOCASA_ENV_WORKER_EPISODE_ATTEMPTS", "1")))
                     row = None
                     frames = []
-                    trace = None
                     for worker_attempt in range(worker_episode_attempts):
                         if worker is None or not worker.is_alive():
                             if worker is not None:
@@ -2365,7 +1999,7 @@ def run_suite(
                                 robocasa_src=robocasa_src,
                                 env_overrides=env_worker_env,
                             )
-                        row, frames, trace = run_episode_worker(
+                        row, frames = run_episode_worker(
                             worker=worker,
                             policy=policy,
                             task=task,
@@ -2378,8 +2012,6 @@ def run_suite(
                             action_clip=action_clip,
                             action_scale=action_scale,
                             action_bound_margin=action_bound_margin,
-                            capture_trace=capture_trace,
-                            placement_success_diagnostics=placement_success_diagnostics,
                         )
                         if not row.get("crashed", False):
                             break
@@ -2413,7 +2045,7 @@ def run_suite(
                         raise ValueError(f"{task.env_name} env action_dimension={env.action_dimension}, expected {ROBOCASA_ACTION_DIM}")
                     action_low, action_high = get_env_action_bounds(env)
                     try:
-                        row, frames, trace = run_episode(
+                        row, frames = run_episode(
                             env=env,
                             policy=policy,
                             task=task,
@@ -2428,8 +2060,6 @@ def run_suite(
                             action_high=action_high,
                             action_scale=action_scale,
                             action_bound_margin=action_bound_margin,
-                            capture_trace=capture_trace,
-                            placement_success_diagnostics=placement_success_diagnostics,
                         )
                     finally:
                         close = getattr(env, "close", None)
@@ -2451,34 +2081,6 @@ def run_suite(
                 if split == "full" and (not row["success"]) and failures_saved < int(save_failure_videos):
                     write_video(split_dir / "failure_videos" / f"{task.env_name}_ep{ep_idx:03d}.mp4", frames)
                     failures_saved += 1
-                if trace is not None and len(trace) >= 2:
-                    trace_path = write_rollout_prediction_trace(
-                        trace,
-                        path=split_dir / "rollout_traces" / f"{task.env_name}_ep{ep_idx:03d}.h5",
-                        task=task,
-                        episode_idx=ep_idx,
-                        global_episode_id=global_id,
-                        lang=str(row.get("lang", "")),
-                        success=bool(row.get("success", False)),
-                        crashed=bool(row.get("crashed", False)),
-                        global_step=global_step,
-                        action_sampling=action_sampling,
-                        seed=episode_seed,
-                    )
-                    print(
-                        json.dumps(
-                            {
-                                "event": "rollout_trace",
-                                "split": split,
-                                "task": task.env_name,
-                                "episode_idx": ep_idx,
-                                "frames": len(trace),
-                                "path": str(trace_path),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
                 rows.append(row)
                 append_jsonl(episodes_path, row)
                 print(json.dumps({"event": "episode", "split": split, **row}, ensure_ascii=False), flush=True)
@@ -2576,22 +2178,6 @@ def main(argv: list[str] | None = None) -> int:
             f"strided-observation rollout expects --execute-horizon to equal obs_stride={obs_stride}, "
             f"got {args.execute_horizon}"
         )
-    pred_next_mode = str(config.get("pred_next_mode", "all_prefixes"))
-    pred_next_steps = int(config.get("pred_next_steps", 1))
-    pred_next_obs_offset_raw = config.get("pred_next_obs_offset")
-    pred_next_obs_offset = None if pred_next_obs_offset_raw is None else int(pred_next_obs_offset_raw)
-    if pred_next_mode == "terminal":
-        trace_action_prefix_len = pred_next_steps
-        trace_target_offset = pred_next_steps if pred_next_obs_offset is None else pred_next_obs_offset
-    else:
-        trace_action_prefix_len = 1
-        trace_target_offset = 1
-    if trace_action_prefix_len < 1 or trace_action_prefix_len > chunk_len:
-        raise ValueError(
-            f"trace_action_prefix_len must be in [1, action_chunk_len={chunk_len}], got {trace_action_prefix_len}"
-        )
-    if trace_target_offset < 1:
-        raise ValueError(f"trace_target_offset must be >= 1, got {trace_target_offset}")
     zero_image_keys = tuple(dict.fromkeys(str(key) for key in (args.zero_image_key or [])))
     available_image_keys = tuple(getattr(model, "image_keys", config.get("image_keys", ROBOCASA_IMAGE_KEYS)))
     unknown_zero_image_keys = sorted(set(zero_image_keys) - set(available_image_keys))
@@ -2688,15 +2274,6 @@ def main(argv: list[str] | None = None) -> int:
         "seq_len": seq_len,
         "warmup_pad_len": warmup_pad_len,
         "obs_stride": obs_stride,
-        "pred_next_mode": pred_next_mode,
-        "pred_next_steps": pred_next_steps,
-        "pred_next_obs_offset": pred_next_obs_offset,
-        "trace_action_prefix_len": trace_action_prefix_len,
-        "trace_target_offset": trace_target_offset,
-        "trace_alignment": (
-            "rollout traces store observation tokens; rgb_predicted[j] is "
-            "the prediction made at j-trace_target_offset for token j"
-        ),
         "action_model_requested": args.action_model,
         "action_model": resolved_action_model,
         "action_sampling": sampling,
@@ -2726,10 +2303,6 @@ def main(argv: list[str] | None = None) -> int:
         },
         "save_videos_per_task": args.save_videos_per_task,
         "save_failure_videos": args.save_failure_videos,
-        "save_rollout_traces": args.save_rollout_traces,
-        "placement_success_diagnostics": bool(
-            args.placement_success_diagnostics
-        ),
         "episode_seed_scheme": EPISODE_SEED_SCHEME,
         "episode_seed_manifest": episode_seed_manifest_summary,
         "episode_seed_contract": (
@@ -2768,14 +2341,11 @@ def main(argv: list[str] | None = None) -> int:
             action_sampling=sampling,
             execute_horizon=args.execute_horizon,
             obs_stride=obs_stride,
-            trace_action_prefix_len=trace_action_prefix_len,
-            trace_target_offset=trace_target_offset,
             seed=args.seed,
             video_skip=args.video_skip,
             render_smoke_video=args.render_smoke_video,
             save_failure_videos=args.save_failure_videos,
             save_videos_per_task=args.save_videos_per_task,
-            save_rollout_traces=args.save_rollout_traces,
             terminate_on_success=args.terminate_on_success,
             env_backend=args.env_backend,
             action_clip=args.action_clip,
@@ -2791,7 +2361,6 @@ def main(argv: list[str] | None = None) -> int:
             zero_lang_emb=args.zero_lang_emb,
             zero_proprio=args.zero_proprio,
             zero_image_keys=zero_image_keys,
-            placement_success_diagnostics=args.placement_success_diagnostics,
             execution_task_names=execution_task_names,
         )
         lang_provider.flush()

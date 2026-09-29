@@ -344,7 +344,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     samplers = tuple(str(item) for item in config.get("holdout_rmse_samplers", ("deterministic", "stochastic")))
     objective_args = {
         "action_weight": float(config.get("action_weight", 1.0)),
-        "include_pred_loss": False,
         "compute_metrics": True,
         "sample_rmse": True,
         "sample_modes": samplers,

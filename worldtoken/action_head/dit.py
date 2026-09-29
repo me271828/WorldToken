@@ -1,8 +1,6 @@
 """Variable-horizon DDPM action head with a DiT-style Transformer denoiser.
 
-This head is intentionally separate from the DPPO-backed MLP/U-Net heads. It
-keeps the same public action-head contract for training and default rollout, but
-its denoiser treats the action chunk as a token sequence instead of flattening
+The denoiser treats the action chunk as a token sequence instead of flattening
 ``H * action_dim`` into fixed Linear layers. With sinusoidal position embeddings,
 the same weights can denoise any positive chunk length.
 """
@@ -17,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from worldtoken.action_head.base import ActionHead
-from worldtoken.action_head.diffusion import threshold_discrete_dims
+from worldtoken.action_head.normalizer import threshold_discrete_dims
 from worldtoken.action_head.normalizer import MinMaxActionNormalizer
 
 
@@ -62,7 +60,7 @@ def _load_diffusers_dit_components():
 
 
 class ActionDirectAdaLNDiTBlock(nn.Module):
-    """DiT block whose adaLN modulation is generated from h or projected h."""
+    """DiT block whose adaLN modulation is generated directly from h."""
 
     def __init__(
         self,
@@ -76,9 +74,6 @@ class ActionDirectAdaLNDiTBlock(nn.Module):
         layer_norm_eps: float,
         attention_bias: bool = True,
         zero_init_adaln: bool = True,
-        use_h_cross_attn: bool = False,
-        use_cross_attn: bool = False,
-        obs_token_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.d_model = int(d_model)
@@ -98,48 +93,6 @@ class ActionDirectAdaLNDiTBlock(nn.Module):
             bias=bool(attention_bias),
             out_bias=True,
         )
-        # Optional cross-attention to encoder obs tokens. diffusers' Attention maps
-        # the encoder's d_model (cross_attention_dim) to the inner dim via to_k/to_v,
-        # so no separate KV projection is needed. The out-proj is zero-initialised so
-        # the cross path starts as a no-op (same rationale as zero-init adaLN below).
-        self.use_cross_attn = bool(use_cross_attn)
-        if self.use_cross_attn:
-            if obs_token_dim is None or int(obs_token_dim) < 1:
-                raise ValueError(f"use_cross_attn=True requires obs_token_dim>=1, got {obs_token_dim}")
-            self.norm_cross = nn.LayerNorm(self.d_model, eps=float(layer_norm_eps))
-            self.cross_attn = Attention(
-                query_dim=self.d_model,
-                cross_attention_dim=int(obs_token_dim),
-                heads=self.n_heads,
-                dim_head=self.d_model // self.n_heads,
-                dropout=float(dropout),
-                bias=bool(attention_bias),
-                out_bias=True,
-            )
-            nn.init.zeros_(self.cross_attn.to_out[0].weight)
-            if self.cross_attn.to_out[0].bias is not None:
-                nn.init.zeros_(self.cross_attn.to_out[0].bias)
-        else:
-            self.norm_cross = None
-            self.cross_attn = None
-        self.use_h_cross_attn = bool(use_h_cross_attn)
-        if self.use_h_cross_attn:
-            self.norm_h_cross = nn.LayerNorm(self.d_model, eps=float(layer_norm_eps))
-            self.h_cross_attn = Attention(
-                query_dim=self.d_model,
-                cross_attention_dim=self.d_model,
-                heads=self.n_heads,
-                dim_head=self.d_model // self.n_heads,
-                dropout=float(dropout),
-                bias=bool(attention_bias),
-                out_bias=True,
-            )
-            nn.init.zeros_(self.h_cross_attn.to_out[0].weight)
-            if self.h_cross_attn.to_out[0].bias is not None:
-                nn.init.zeros_(self.h_cross_attn.to_out[0].bias)
-        else:
-            self.norm_h_cross = None
-            self.h_cross_attn = None
         self.norm2 = nn.LayerNorm(self.d_model, eps=float(layer_norm_eps))
         self.ff = FeedForward(
             self.d_model,
@@ -166,27 +119,12 @@ class ActionDirectAdaLNDiTBlock(nn.Module):
         x: torch.Tensor,
         h_adaln_cond: torch.Tensor,
         time_cond: torch.Tensor,
-        obs_kv: torch.Tensor | None = None,
-        obs_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
-        h_kv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.h_adaln(h_adaln_cond) + self.time_adaln(time_cond)
         ).chunk(6, dim=-1)
         norm_x = self._modulate(self.norm1(x), shift_msa, scale_msa)
         x = x + gate_msa[:, None] * self.attn(norm_x)
-        if self.h_cross_attn is not None and h_kv is not None:
-            x = x + self.h_cross_attn(self.norm_h_cross(x), encoder_hidden_states=h_kv)
-        if self.cross_attn is not None and obs_kv is not None:
-            cross = self.cross_attn(
-                self.norm_cross(x),
-                encoder_hidden_states=obs_kv,
-                attention_mask=obs_mask,
-            )
-            if obs_has_context is not None:
-                cross = cross * obs_has_context[:, None, None].to(dtype=cross.dtype)
-            x = x + cross
         mlp_in = self._modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp[:, None] * self.ff(mlp_in)
         return x
@@ -197,9 +135,7 @@ class ActionDiTDenoiser(nn.Module):
 
     Action tokens receive dynamic sinusoidal positions, so no parameter depends
     on the chunk length. By default, h is expanded directly to adaLN modulation
-    in every block. When ``h_adaln_bottleneck`` is enabled, h is first projected
-    to ``d_model`` and each block expands that projected vector to the six adaLN
-    modulation vectors, matching the older cond_proj -> adaLN path.
+    in every block.
     """
 
     def __init__(
@@ -216,12 +152,7 @@ class ActionDiTDenoiser(nn.Module):
         layer_norm_eps: float = 1.0e-5,
         time_embed_dim: int | None = None,
         zero_init_adaln: bool = True,
-        h_adaln_bottleneck: bool = False,
         attention_bias: bool = True,
-        use_h_cross_attn: bool = False,
-        h_cross_attn_tokens: int | None = None,
-        use_obs_cross_attn: bool = False,
-        obs_token_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.action_dim = int(action_dim)
@@ -230,17 +161,6 @@ class ActionDiTDenoiser(nn.Module):
         self.n_layers = int(n_layers)
         self.n_heads = int(n_heads)
         self.time_embed_dim = int(time_embed_dim or d_model)
-        self.h_adaln_bottleneck = bool(h_adaln_bottleneck)
-        self.use_h_cross_attn = bool(use_h_cross_attn)
-        self.h_cross_attn_tokens = (
-            int(h_cross_attn_tokens)
-            if h_cross_attn_tokens is not None
-            else math.ceil(self.cond_dim / self.d_model)
-        )
-        self.use_obs_cross_attn = bool(use_obs_cross_attn)
-        self.obs_token_dim = int(obs_token_dim) if obs_token_dim is not None else None
-        if self.use_obs_cross_attn and (self.obs_token_dim is None or self.obs_token_dim < 1):
-            raise ValueError(f"use_obs_cross_attn=True requires obs_token_dim>=1, got {obs_token_dim}")
         if self.action_dim < 1 or self.cond_dim < 1 or self.d_model < 1:
             raise ValueError(
                 f"action_dim, cond_dim, and d_model must be positive, got "
@@ -250,22 +170,10 @@ class ActionDiTDenoiser(nn.Module):
             raise ValueError(f"n_layers and n_heads must be positive, got {self.n_layers}, {self.n_heads}")
         if self.d_model % self.n_heads != 0:
             raise ValueError(f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}")
-        if self.use_h_cross_attn and self.h_cross_attn_tokens < 1:
-            raise ValueError(f"h_cross_attn_tokens must be >= 1, got {self.h_cross_attn_tokens}")
 
         hidden = int(dim_feedforward or 4 * self.d_model)
         self.action_in = nn.Linear(self.action_dim, self.d_model)
-        if self.h_adaln_bottleneck:
-            self.cond_proj = nn.Linear(self.cond_dim, self.d_model)
-            h_adaln_dim = self.d_model
-        else:
-            h_adaln_dim = self.cond_dim
-        if self.use_h_cross_attn:
-            self.h_token_proj = nn.Linear(self.cond_dim, self.h_cross_attn_tokens * self.d_model)
-            self.h_token_norm = nn.LayerNorm(self.d_model, eps=float(layer_norm_eps))
-        else:
-            self.h_token_proj = None
-            self.h_token_norm = None
+        h_adaln_dim = self.cond_dim
         self.time_mlp = nn.Sequential(
             nn.Linear(self.time_embed_dim, self.d_model),
             nn.SiLU(),
@@ -283,9 +191,6 @@ class ActionDiTDenoiser(nn.Module):
                     layer_norm_eps=float(layer_norm_eps),
                     attention_bias=bool(attention_bias),
                     zero_init_adaln=bool(zero_init_adaln),
-                    use_h_cross_attn=self.use_h_cross_attn,
-                    use_cross_attn=self.use_obs_cross_attn,
-                    obs_token_dim=self.obs_token_dim,
                 )
                 for _ in range(self.n_layers)
             ]
@@ -300,14 +205,8 @@ class ActionDiTDenoiser(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor,
-        obs_tokens: torch.Tensor | None = None,
-        obs_token_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict diffusion noise or x0 for ``x`` with shape ``[B, H, A]``.
-
-        When obs cross-attention is enabled, ``obs_tokens`` is the encoder's
-        exported obs-token sequence ``[B, M, obs_token_dim]`` (KV for every block).
         """
         if x.ndim != 3 or x.shape[-1] != self.action_dim:
             raise ValueError(f"x must be [B,H,{self.action_dim}], got {tuple(x.shape)}")
@@ -317,58 +216,22 @@ class ActionDiTDenoiser(nn.Module):
         if horizon < 1:
             raise ValueError("action horizon must be >= 1")
 
-        obs_kv = None
-        h_kv = None
-        if self.use_obs_cross_attn:
-            if obs_tokens is None:
-                raise ValueError("use_obs_cross_attn=True but obs_tokens were not provided")
-            if obs_tokens.ndim != 3 or obs_tokens.shape[0] != b or obs_tokens.shape[-1] != self.obs_token_dim:
-                raise ValueError(
-                    f"obs_tokens must be [B,M,{self.obs_token_dim}] matching x's batch {b}, "
-                    f"got {tuple(obs_tokens.shape)}"
-                )
-            if obs_token_mask is not None and (
-                obs_token_mask.ndim != 2
-                or obs_token_mask.shape[0] != b
-                or obs_token_mask.shape[1] != obs_tokens.shape[1]
-            ):
-                raise ValueError(
-                    f"obs_token_mask must be [B={b},M={obs_tokens.shape[1]}], "
-                    f"got {tuple(obs_token_mask.shape)}"
-                )
-            if obs_has_context is not None and (
-                obs_has_context.ndim != 1 or obs_has_context.shape[0] != b
-            ):
-                raise ValueError(f"obs_has_context must be [B={b}], got {tuple(obs_has_context.shape)}")
 
         t = t.to(device=x.device).reshape(b)
         action_tokens = self.action_in(x)
         pos = _sinusoidal_embedding(torch.arange(horizon, device=x.device), self.d_model).to(dtype=action_tokens.dtype)
         action_tokens = action_tokens + pos.unsqueeze(0)
-        if self.use_obs_cross_attn:
-            obs_kv = obs_tokens.to(dtype=action_tokens.dtype)
-            if obs_token_mask is not None:
-                obs_token_mask = obs_token_mask.to(device=x.device, dtype=torch.bool)
-            if obs_has_context is not None:
-                obs_has_context = obs_has_context.to(device=x.device, dtype=torch.bool)
 
         time_emb = _sinusoidal_embedding(t, self.time_embed_dim).to(dtype=action_tokens.dtype)
         cond = cond.to(dtype=action_tokens.dtype)
-        h_adaln_cond = self.cond_proj(cond) if self.h_adaln_bottleneck else cond
+        h_adaln_cond = cond
         time_cond = self.time_mlp(time_emb)
-        if self.use_h_cross_attn:
-            h_kv = self.h_token_proj(cond).view(b, self.h_cross_attn_tokens, self.d_model)
-            h_kv = self.h_token_norm(h_kv)
         tokens = action_tokens
         for block in self.blocks:
             tokens = block(
                 tokens,
                 h_adaln_cond,
                 time_cond,
-                obs_kv=obs_kv,
-                obs_mask=obs_token_mask,
-                obs_has_context=obs_has_context,
-                h_kv=h_kv,
             )
         actions = self.action_out(self.out_norm(tokens))
         return actions
@@ -378,7 +241,6 @@ class ActionDiffusionDiTHead(ActionHead):
     """DDPM action head whose Transformer denoiser supports variable chunk length."""
 
     supports_variable_horizon = True
-    OBS_TOKEN_SOURCES = ("post_fusion", "pre_fusion")
 
     def __init__(
         self,
@@ -396,13 +258,7 @@ class ActionDiffusionDiTHead(ActionHead):
         layer_norm_eps: float = 1.0e-5,
         time_embed_dim: int | None = None,
         zero_init_adaln: bool = True,
-        h_adaln_bottleneck: bool = False,
         attention_bias: bool = True,
-        use_h_cross_attn: bool = False,
-        h_cross_attn_tokens: int | None = None,
-        use_obs_cross_attn: bool = False,
-        obs_tokens_source: str = "post_fusion",
-        obs_token_dim: int | None = None,
         predict_epsilon: bool = True,
         denoised_clip_value: float = 1.0,
         beta_schedule: str = "squaredcos_cap_v2",
@@ -415,20 +271,6 @@ class ActionDiffusionDiTHead(ActionHead):
         self.action_dim = int(action_dim)
         self.action_chunk_len = int(action_chunk_len)
         self.denoising_steps = int(denoising_steps)
-        self.h_adaln_bottleneck = bool(h_adaln_bottleneck)
-        self.use_h_cross_attn = bool(use_h_cross_attn)
-        self.h_cross_attn_tokens = (
-            int(h_cross_attn_tokens)
-            if h_cross_attn_tokens is not None
-            else math.ceil(self.cond_dim / int(d_model))
-        )
-        self.use_obs_cross_attn = bool(use_obs_cross_attn)
-        self.obs_tokens_source = str(obs_tokens_source)
-        if self.obs_tokens_source not in self.OBS_TOKEN_SOURCES:
-            raise ValueError(
-                f"obs_tokens_source must be one of {self.OBS_TOKEN_SOURCES}, got {obs_tokens_source!r}"
-            )
-        self.obs_token_dim = int(obs_token_dim) if obs_token_dim is not None else None
         self.predict_epsilon = bool(predict_epsilon)
         self.denoised_clip_value = float(denoised_clip_value)
         self.beta_schedule = str(beta_schedule)
@@ -452,24 +294,11 @@ class ActionDiffusionDiTHead(ActionHead):
             layer_norm_eps=float(layer_norm_eps),
             time_embed_dim=time_embed_dim,
             zero_init_adaln=bool(zero_init_adaln),
-            h_adaln_bottleneck=self.h_adaln_bottleneck,
             attention_bias=bool(attention_bias),
-            use_h_cross_attn=self.use_h_cross_attn,
-            h_cross_attn_tokens=h_cross_attn_tokens,
-            use_obs_cross_attn=self.use_obs_cross_attn,
-            obs_token_dim=self.obs_token_dim,
         )
         self.scheduler = self._build_scheduler()
         self.to(torch.device(device))
 
-    @property
-    def needs_obs_tokens(self) -> bool:
-        """True when the denoiser cross-attends to encoder obs tokens.
-
-        Callers (model.forward / objective / rollout) use this to decide whether
-        to compute and thread ``obs_tokens`` into ``bc_loss`` / ``sample``.
-        """
-        return self.use_obs_cross_attn
 
     def _build_scheduler(self) -> Any:
         DDPMScheduler = _load_ddpm_scheduler()
@@ -487,42 +316,6 @@ class ActionDiffusionDiTHead(ActionHead):
             raise ValueError(f"h_flat must be [N,{self.cond_dim}], got {tuple(h_flat.shape)}")
         return h_flat.float()
 
-    def _check_obs_tokens(self, obs_tokens: torch.Tensor | None, n: int) -> torch.Tensor | None:
-        """Validate obs tokens against the cross-attn config and batch size ``n``."""
-        if not self.use_obs_cross_attn:
-            return None
-        if obs_tokens is None:
-            raise ValueError("this head was built with use_obs_cross_attn=True but obs_tokens were not provided")
-        if obs_tokens.ndim != 3 or obs_tokens.shape[0] != n or obs_tokens.shape[-1] != self.obs_token_dim:
-            raise ValueError(
-                f"obs_tokens must be [N,M,{self.obs_token_dim}] with N={n}, got {tuple(obs_tokens.shape)}"
-            )
-        return obs_tokens.float()
-
-    def _check_obs_context(
-        self,
-        obs_tokens: torch.Tensor | None,
-        obs_token_mask: torch.Tensor | None,
-        obs_has_context: torch.Tensor | None,
-        n: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        obs_tokens = self._check_obs_tokens(obs_tokens, n)
-        if obs_tokens is None:
-            if obs_token_mask is not None or obs_has_context is not None:
-                raise ValueError("obs_token_mask/obs_has_context require use_obs_cross_attn=True")
-            return None, None, None
-        if obs_token_mask is not None:
-            if obs_token_mask.ndim != 2 or obs_token_mask.shape != obs_tokens.shape[:2]:
-                raise ValueError(
-                    f"obs_token_mask must have shape {tuple(obs_tokens.shape[:2])}, "
-                    f"got {tuple(obs_token_mask.shape)}"
-                )
-            obs_token_mask = obs_token_mask.to(device=obs_tokens.device, dtype=torch.bool)
-        if obs_has_context is not None:
-            if obs_has_context.ndim != 1 or obs_has_context.shape[0] != n:
-                raise ValueError(f"obs_has_context must be [N={n}], got {tuple(obs_has_context.shape)}")
-            obs_has_context = obs_has_context.to(device=obs_tokens.device, dtype=torch.bool)
-        return obs_tokens, obs_token_mask, obs_has_context
 
     def _bc_loss_sample(
         self,
@@ -540,9 +333,6 @@ class ActionDiffusionDiTHead(ActionHead):
         left_descent_preferred_fraction: float = 0.0,
         left_descent_direction_weight: float = 1.0,
         left_descent_shallow_factor: float = 6.0,
-        obs_tokens: torch.Tensor | None = None,
-        obs_token_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h_flat = self._check_h(h_flat)
@@ -684,12 +474,6 @@ class ActionDiffusionDiTHead(ActionHead):
                 raise ValueError(
                     "left_descent_extra_directions must be finite"
                 )
-        obs_tokens, obs_token_mask, obs_has_context = self._check_obs_context(
-            obs_tokens,
-            obs_token_mask,
-            obs_has_context,
-            h_flat.shape[0],
-        )
         x_start = self.normalizer.normalize(actions_chunk.float())
         t = torch.randint(
             0,
@@ -704,9 +488,6 @@ class ActionDiffusionDiTHead(ActionHead):
             x_noisy,
             t,
             h_flat,
-            obs_tokens=obs_tokens,
-            obs_token_mask=obs_token_mask,
-            obs_has_context=obs_has_context,
         )
         target = noise if self.predict_epsilon else x_start
         squared_error = (pred - target).square()
@@ -895,9 +676,6 @@ class ActionDiffusionDiTHead(ActionHead):
         left_descent_preferred_fraction: float = 0.0,
         left_descent_direction_weight: float = 1.0,
         left_descent_shallow_factor: float = 6.0,
-        obs_tokens: torch.Tensor | None = None,
-        obs_token_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         per_sample_out: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -926,9 +704,6 @@ class ActionDiffusionDiTHead(ActionHead):
             left_descent_preferred_fraction=left_descent_preferred_fraction,
             left_descent_direction_weight=left_descent_direction_weight,
             left_descent_shallow_factor=left_descent_shallow_factor,
-            obs_tokens=obs_tokens,
-            obs_token_mask=obs_token_mask,
-            obs_has_context=obs_has_context,
             generator=generator,
         )
         if per_sample_out is not None:
@@ -940,9 +715,6 @@ class ActionDiffusionDiTHead(ActionHead):
         h_flat: torch.Tensor,
         actions_chunk: torch.Tensor,
         *,
-        obs_tokens: torch.Tensor | None = None,
-        obs_token_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         num_passes: int = 5,
         per_sample_out: list[torch.Tensor] | None = None,
@@ -963,9 +735,6 @@ class ActionDiffusionDiTHead(ActionHead):
         loss, t, per_sample = self._bc_loss_sample(
             h_flat,
             actions_chunk,
-            obs_tokens=obs_tokens,
-            obs_token_mask=obs_token_mask,
-            obs_has_context=obs_has_context,
             generator=generator,
         )
         state_after_primary = generator.get_state() if generator is not None else None
@@ -994,9 +763,6 @@ class ActionDiffusionDiTHead(ActionHead):
                 loss_extra, t_extra, per_extra = self._bc_loss_sample(
                     h_flat,
                     actions_chunk,
-                    obs_tokens=obs_tokens,
-                    obs_token_mask=obs_token_mask,
-                    obs_has_context=obs_has_context,
                     generator=generator,
                 )
             else:
@@ -1004,9 +770,6 @@ class ActionDiffusionDiTHead(ActionHead):
                     loss_extra, t_extra, per_extra = self._bc_loss_sample(
                         h_flat,
                         actions_chunk,
-                        obs_tokens=obs_tokens,
-                        obs_token_mask=obs_token_mask,
-                        obs_has_context=obs_has_context,
                         generator=generator,
                     )
             total_loss = total_loss + loss_extra
@@ -1076,9 +839,6 @@ class ActionDiffusionDiTHead(ActionHead):
         generator: torch.Generator | None = None,
         num_samples: int = 1,
         horizon: int | None = None,
-        obs_tokens: torch.Tensor | None = None,
-        obs_token_mask: torch.Tensor | None = None,
-        obs_has_context: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Reverse-denoise to ``[N, H, action_dim]``; ``H`` may be overridden."""
         h_flat = self._check_h(h_flat)
@@ -1090,22 +850,7 @@ class ActionDiffusionDiTHead(ActionHead):
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
 
         n = h_flat.shape[0]
-        obs_tokens, obs_token_mask, obs_has_context = self._check_obs_context(
-            obs_tokens,
-            obs_token_mask,
-            obs_has_context,
-            n,
-        )
         cond = h_flat if k == 1 else h_flat.repeat_interleave(k, dim=0)
-        kv = obs_tokens
-        kv_mask = obs_token_mask
-        kv_has_context = obs_has_context
-        if kv is not None and k > 1:
-            kv = kv.repeat_interleave(k, dim=0)
-            if kv_mask is not None:
-                kv_mask = kv_mask.repeat_interleave(k, dim=0)
-            if kv_has_context is not None:
-                kv_has_context = kv_has_context.repeat_interleave(k, dim=0)
         b = cond.shape[0]
         x = torch.randn(
             (b, sample_horizon, self.action_dim),
@@ -1113,8 +858,6 @@ class ActionDiffusionDiTHead(ActionHead):
             dtype=cond.dtype,
             generator=generator,
         )
-        if kv is not None:
-            kv = kv.to(device=cond.device, dtype=cond.dtype)
         self.scheduler.set_timesteps(self.denoising_steps, device=cond.device)
         for t in self.scheduler.timesteps:
             t_int = int(t.item()) if torch.is_tensor(t) else int(t)
@@ -1124,9 +867,6 @@ class ActionDiffusionDiTHead(ActionHead):
                 model_input,
                 t_b,
                 cond,
-                obs_tokens=kv,
-                obs_token_mask=kv_mask,
-                obs_has_context=kv_has_context,
             )
             if deterministic:
                 # DDPMScheduler.step always injects variance noise for t > 0;

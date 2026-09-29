@@ -15,15 +15,14 @@ import torch
 from worldtoken.action_head import build_action_head
 from worldtoken.config import BuildConfig, load_config
 from worldtoken.constants import ROBOCASA_OBJECTIVE
-from worldtoken.dynamics import build_dynamics
 from worldtoken.encoder import build_encoder
 from worldtoken.envs import get_env_specs
-from worldtoken.model import LatentBottleneck, RoboCasaDiffusionActionModel
+from worldtoken.model import RoboCasaDiffusionActionModel
 from worldtoken.specs import ActionSpec, ObsSpec
 from worldtoken.transformer import build_backbone
 
 
-_CANONICAL_SECTIONS = ("model", "encoder", "sequence_model", "action_head", "dynamics")
+_CANONICAL_SECTIONS = ("model", "encoder", "sequence_model", "action_head")
 
 
 def _as_raw_dict(cfg: dict | str) -> dict[str, Any]:
@@ -72,11 +71,6 @@ def build_model(cfg: BuildConfig | dict | str, *, device: str = "cpu") -> tuple[
     latent_dim = int(cfg.model.latent_dim)
     chunk = int(cfg.model.action_chunk_len)
     hidden_dim = int(cfg.sequence_model.hidden_dim) if cfg.sequence_model.hidden_dim else latent_dim
-    if cfg.action_head.type == "diffusion_history_dit" and cfg.sequence_model.type != "identity":
-        raise ValueError(
-            "action_head.type='diffusion_history_dit' is the no-temporal-backbone baseline "
-            "and requires sequence_model.type='identity'"
-        )
 
     encoder = build_encoder(cfg.encoder, obs_spec=obs_spec, latent_dim=latent_dim)
     if int(encoder.latent_dim) != latent_dim:
@@ -100,51 +94,17 @@ def build_model(cfg: BuildConfig | dict | str, *, device: str = "cpu") -> tuple[
                 "that exposes a token_layout contract"
             )
         validate_token_layout(token_layout)
-    if encoder_is_multi_token and cfg.dynamics.enabled:
-        raise ValueError(
-            "multi-token encoder/backbone currently supports action-only training; "
-            "dynamics must be disabled"
-        )
-    # Cross-attn action heads consume encoder obs tokens; validate the encoder can
-    # provide them and forward its token dim (d_model) to the head.
-    obs_token_dim = int(encoder.d_model) if getattr(encoder, "provides_obs_tokens", False) else None
-    if bool(cfg.action_head.params.get("use_obs_cross_attn", False)) and obs_token_dim is None:
-        raise ValueError(
-            f"action_head.use_obs_cross_attn=True but encoder {cfg.encoder.type!r} does not expose obs tokens "
-            "(needs a spatial-token encoder such as attn_fusion with provides_obs_tokens=True)"
-        )
     action_head = build_action_head(
         cfg.action_head,
         latent_dim=latent_dim,
         action_spec=action_spec,
         action_chunk_len=chunk,
         device=device,
-        obs_token_dim=obs_token_dim,
     )
-    pred_decoder = (
-        build_dynamics(cfg.dynamics, latent_dim=latent_dim, obs_spec=obs_spec, action_spec=action_spec, action_chunk_len=chunk)
-        if cfg.dynamics.enabled
-        else None
-    )
-    z_bottleneck_dim = cfg.z_bottleneck.dim
-    z_bottleneck = None
-    if z_bottleneck_dim is not None:
-        z_bottleneck_dim = int(z_bottleneck_dim)
-        if z_bottleneck_dim <= 0:
-            raise ValueError(f"z_bottleneck.dim must be positive when set, got {z_bottleneck_dim}")
-        if z_bottleneck_dim > latent_dim:
-            raise ValueError(
-                f"z_bottleneck.dim={z_bottleneck_dim} cannot exceed model.latent_dim={latent_dim}"
-            )
-        if z_bottleneck_dim < latent_dim:
-            z_bottleneck = LatentBottleneck(latent_dim=latent_dim, bottleneck_dim=z_bottleneck_dim)
-
     model = RoboCasaDiffusionActionModel(
         encoder,
         predictor,
         action_head,
-        pred_decoder=pred_decoder,
-        z_bottleneck=z_bottleneck,
         obs_spec=obs_spec,
         action_spec=action_spec,
         latent_dim=latent_dim,
@@ -179,6 +139,4 @@ def resolved_config_dict(cfg: BuildConfig, obs_spec: ObsSpec, action_spec: Actio
             "params": dict(cfg.sequence_model.params),
         },
         "action_head": {"type": cfg.action_head.type, "params": dict(cfg.action_head.params)},
-        "dynamics": {"enabled": bool(cfg.dynamics.enabled), "type": cfg.dynamics.type, "params": dict(cfg.dynamics.params)},
-        "z_bottleneck": {"dim": cfg.z_bottleneck.dim},
     }

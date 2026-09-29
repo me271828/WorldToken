@@ -1,9 +1,4 @@
-"""Sequence backbones over continuous tokens.
-
-``ContinuousTokenTransformer`` selects the HF decoder family via ``backbone_type``
-(qwen2/llama/mistral) -- the "swap the attention block" knob. ``IdentitySequenceBackbone``
-is the no-temporal-mixer baseline: ``h = z``.
-"""
+"""Qwen2 temporal backbones for single-token and frame-major paper policies."""
 
 from __future__ import annotations
 
@@ -14,19 +9,13 @@ from worldtoken.transformer.hf import (
     ContinuousModelConfig,
     ContinuousTokenTransformer,
 )
-from worldtoken.transformer.identity import IdentitySequenceBackbone
 from worldtoken.transformer.frame_major import FrameMajorContinuousTokenTransformer
 from worldtoken.transformer.multi_token import MultiTokenContinuousTokenTransformer
-from worldtoken.transformer.frame_major_3d import (
-    FrameMajor3DContinuousTokenTransformer,
-)
 
 SEQUENCE_MODEL_REGISTRY: dict[str, type[SequenceBackbone]] = {
     "continuous_transformer": ContinuousTokenTransformer,
-    "identity": IdentitySequenceBackbone,
     "frame_major_continuous_transformer": FrameMajorContinuousTokenTransformer,
     "multi_token_continuous_transformer": MultiTokenContinuousTokenTransformer,
-    "frame_major_3d_continuous_transformer": FrameMajor3DContinuousTokenTransformer,
 }
 
 
@@ -45,10 +34,8 @@ def build_backbone(cfg, *, latent_dim: int) -> SequenceBackbone:
 __all__ = [
     "SequenceBackbone",
     "ContinuousTokenTransformer",
-    "IdentitySequenceBackbone",
     "FrameMajorContinuousTokenTransformer",
     "MultiTokenContinuousTokenTransformer",
-    "FrameMajor3DContinuousTokenTransformer",
     "ContinuousModelConfig",
     "SUPPORTED_BACKBONES",
     "DEFAULT_MAX_CONTEXT_LEN",

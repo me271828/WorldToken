@@ -480,8 +480,6 @@ def test_rmbench_batch_to_action_objective_backward(tmp_path: Path, tiny_cfg) ->
         action_dim=14,
         discrete_dims=(),
         action_chunk_len=3,
-
-        pred_next=False,
     )
     model, _ = build_model(config, device="cpu")
     model.configure_training_memory(
@@ -543,8 +541,6 @@ def test_weighted_rmbench_action_objective_backward(tmp_path: Path, tiny_cfg) ->
         action_dim=14,
         discrete_dims=(),
         action_chunk_len=3,
-
-        pred_next=False,
     )
     config["action_head"] = {
         "type": "diffusion_dit",
@@ -617,8 +613,6 @@ def test_left_descent_corridor_objective_backward(
         action_dim=14,
         discrete_dims=(),
         action_chunk_len=3,
-
-        pred_next=False,
     )
     config["action_head"] = {
         "type": "diffusion_dit",

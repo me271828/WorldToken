@@ -2,34 +2,28 @@
 
 None of these depend on the CLI argparse namespace; the trainer owns the
 CLI -> objective mapping and calls :func:`run_holdout_eval_loader` (which streams
-an eval split without retaining the full batch list) plus the prediction-trace writer.
+an eval split without retaining the full batch list).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import inspect
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 
 from worldtoken.data import RoboCasaCollator, RoboCasaDemoRef, _import_h5py, move_batch_to_device
-from worldtoken.envs.robocasa import ROBOCASA_ACTION_DIM, ROBOCASA_PROPRIO_DIM
+from worldtoken.envs.robocasa import ROBOCASA_ACTION_DIM
 from worldtoken.model import RoboCasaDiffusionActionModel
 from worldtoken.objective import robocasa_diffusion_action_objective
 from worldtoken.train_utils import (
     _eval_metrics_to_float,
-    _float_tensor_np,
-    _image_float_to_uint8_np,
     autocast_context,
     mean_metrics,
-    write_prediction_trace_h5,
 )
 
 
@@ -179,8 +173,6 @@ def _holdout_metric_weight_key(key: str) -> str | None:
         return f"action_{prefix_metric}_valid_count"
     if key.startswith("action_ddpm_loss/"):
         return f"{key}_count"
-    if key.startswith("pred_next_") or key.startswith("weighted_pred_next_"):
-        return "pred_next_valid_count"
     return None
 
 
@@ -759,271 +751,3 @@ def run_holdout_eval_loader(
         per_task=per_task,
     )
     return summarize_holdout_eval_rows(payload, per_task=per_task)
-
-
-def _decode_holdout_prediction(
-    *,
-    raw_model: torch.nn.Module,
-    h_used: torch.Tensor,
-    prefix_norm: torch.Tensor,
-    base_images: dict[str, torch.Tensor],
-    sample_deterministic: bool,
-    trace_gen: torch.Generator,
-    trace_denoising_steps: int,
-) -> dict[str, Any]:
-    """Decode holdout next-observation predictions without changing old decoders.
-
-    Existing dynamics modules expose ``decode_with_action_prefix`` and keep their
-    previous path. Token-translator dynamics needs the current/base image too, so
-    it exposes ``predict_next`` over flattened rows.
-    """
-    pred_decoder = raw_model.pred_decoder
-    decode = getattr(pred_decoder, "decode_with_action_prefix", None)
-    if callable(decode):
-        decode_params = inspect.signature(decode).parameters
-        decode_kwargs: dict[str, Any] = {}
-        if "deterministic" in decode_params:
-            decode_kwargs["deterministic"] = bool(sample_deterministic)
-        if "generator" in decode_params:
-            decode_kwargs["generator"] = trace_gen
-        if "denoising_steps" in decode_params:
-            decode_kwargs["denoising_steps"] = trace_denoising_steps
-        return decode(h_used, prefix_norm, **decode_kwargs)
-
-    predict_next = getattr(pred_decoder, "predict_next", None)
-    if not callable(predict_next):
-        raise AttributeError(
-            f"{type(pred_decoder).__name__} must expose decode_with_action_prefix() or predict_next() "
-            "to write holdout prediction traces"
-        )
-
-    if h_used.ndim != 3:
-        raise ValueError(f"h_used must be [B,T,D], got {tuple(h_used.shape)}")
-    if prefix_norm.ndim != 4 or prefix_norm.shape[:2] != h_used.shape[:2]:
-        raise ValueError(f"prefix_norm must be [B,T,K,A] aligned with h_used, got {tuple(prefix_norm.shape)}")
-    b, t = int(h_used.shape[0]), int(h_used.shape[1])
-    n = b * t
-    h_flat = h_used.reshape(n, h_used.shape[-1])
-    prefix_flat = prefix_norm.reshape(n, int(prefix_norm.shape[2]), int(prefix_norm.shape[3]))
-    base_flat: dict[str, torch.Tensor] = {}
-    for key in raw_model.image_keys:
-        img = base_images[key]
-        if img.shape[:2] != (b, t):
-            raise ValueError(f"base image {key!r} must be [B,T,...] aligned with h_used, got {tuple(img.shape)}")
-        base_flat[key] = img.reshape(n, *img.shape[2:])
-
-    decoded_flat = predict_next(raw_model, h_flat, base_flat, prefix_flat)
-    return {
-        "images": {
-            key: value.reshape(b, t, *value.shape[1:])
-            for key, value in decoded_flat["images"].items()
-        },
-        "proprio": decoded_flat["proprio"].reshape(b, t, *decoded_flat["proprio"].shape[1:]),
-        "lang_emb": decoded_flat["lang_emb"].reshape(b, t, *decoded_flat["lang_emb"].shape[1:]),
-    }
-
-
-@torch.no_grad()
-def write_robocasa_holdout_prediction_trace(
-    *,
-    model: torch.nn.Module,
-    batch: dict[str, Any],
-    output_dir: Path,
-    global_step: int,
-    epoch: int,
-    device: torch.device,
-    precision: str,
-    pred_loss_active: bool,
-    denoising_steps: int,
-    sample_deterministic: bool,
-    eval_seed: int,
-    pred_next_steps: int,
-    pred_next_mode: str,
-    pred_next_obs_offset: int | None,
-    obs_stride: int,
-) -> Path:
-    """Write one deterministic holdout sample as an H5 prediction trace.
-
-    For each of the three RoboCasa cameras the trace stores two image streams
-    (3 cameras x 2 streams = 6 image streams per frame):
-
-    * ``rgb/<cam>``                 -- the real observation at t;
-    * ``rgb_predicted/<cam>`` -- the sampled-action conditioned decode the
-      model produced at t-offset *for* t, where offset is 1 for legacy/all-prefix
-      traces and defaults to ``pred_next_steps`` for terminal-mode traces. Strided
-      observation runs can set ``pred_next_obs_offset=1`` while keeping a longer
-      action prefix. The first offset frames have no previous prediction, so they
-      are black.
-
-    The action head is genuinely sampled here using the diffusion reverse
-    process, so ``diag/pred_image_mse`` reflects the sampled one-step
-    or terminal-horizon prediction quality, not a teacher-forced proxy.
-    Only sample 0 of ``batch`` is rendered; the trace is written atomically (the
-    shared :func:`write_prediction_trace_h5` owns the on-disk schema).
-    """
-    path = output_dir / "holdout_prediction_traces" / f"holdout_step_{int(global_step):08d}.h5"
-
-    raw_model = model.module if isinstance(model, DDP) else model
-    image_keys = tuple(raw_model.image_keys)
-    image_hw = (int(raw_model.image_hw[0]), int(raw_model.image_hw[1]))
-    trace_denoising_steps = int(
-        getattr(raw_model.pred_decoder, "denoising_steps", denoising_steps)
-    )
-    was_training = model.training
-    model.eval()
-
-    # Move only sample 0 to the device (the holdout batch lives on CPU).
-    images = {key: batch["images"][key][0:1].to(device) for key in image_keys}
-    proprio = batch["proprio"][0:1].to(device)
-    lang_emb = batch["lang_emb"][0:1].to(device)
-    actions = batch["actions"][0:1].to(device)
-    T = int(proprio.shape[1])
-    if T < 2:
-        raise ValueError(f"holdout trace requires sequence length >= 2, got {T}")
-    trace_action_prefix_len = int(pred_next_steps) if str(pred_next_mode) == "terminal" else 1
-    trace_target_offset = (
-        int(pred_next_obs_offset)
-        if str(pred_next_mode) == "terminal" and pred_next_obs_offset is not None
-        else trace_action_prefix_len
-    )
-    if trace_action_prefix_len < 1:
-        raise ValueError(f"trace_action_prefix_len must be >= 1, got {trace_action_prefix_len}")
-    if trace_target_offset < 1:
-        raise ValueError(f"trace_target_offset must be >= 1, got {trace_target_offset}")
-    if trace_action_prefix_len > int(raw_model.action_chunk_len):
-        raise ValueError(
-            f"trace_action_prefix_len ({trace_action_prefix_len}) cannot exceed "
-            f"action_chunk_len={int(raw_model.action_chunk_len)}"
-        )
-    if trace_target_offset >= T:
-        raise ValueError(f"trace_target_offset must be < trace seq_len={T}, got {trace_target_offset}")
-
-    try:
-        with autocast_context(device, precision):
-            outputs = raw_model(images, proprio, lang_emb, run_prediction=False)
-            h = raw_model.conditioning(outputs["z"])
-            trace_gen = torch.Generator(device=device).manual_seed(int(eval_seed))
-            chunk_kwargs = {"obs_tokens": outputs["obs_tokens"]} if "obs_tokens" in outputs else {}
-            if bool(getattr(getattr(raw_model, "action_head", None), "needs_world_history", False)):
-                world_tokens, world_token_mask = raw_model.past_world_context(outputs["z"])
-                chunk_kwargs["world_tokens"] = world_tokens
-                chunk_kwargs["world_token_mask"] = world_token_mask
-            action_chunk = raw_model.sample_action_chunk(
-                h,
-                deterministic=bool(sample_deterministic),
-                generator=trace_gen,
-                **chunk_kwargs,
-            )
-            action_sampled = action_chunk[:, :, 0, :]
-            h_used = h[:, : T - trace_target_offset, :]
-            action_prefix = action_chunk[:, : T - trace_target_offset, :trace_action_prefix_len, :]
-            prefix_norm = raw_model._encode_action_for_decoder(action_prefix)
-            decoded_pred = _decode_holdout_prediction(
-                raw_model=raw_model,
-                h_used=h_used,
-                prefix_norm=prefix_norm,
-                base_images={key: images[key][:, : T - trace_target_offset] for key in image_keys},
-                sample_deterministic=bool(sample_deterministic),
-                trace_gen=trace_gen,
-                trace_denoising_steps=trace_denoising_steps,
-            )
-    finally:
-        if was_training:
-            model.train()
-
-    rgb_true: dict[str, np.ndarray] = {}
-    rgb_predicted: dict[str, np.ndarray] = {}
-    pred_image_mse: dict[str, np.ndarray] = {}
-    for key in image_keys:
-        true_u8 = images[key][0].detach().cpu().numpy()
-        target = images[key].float().div(255.0)
-        pred_full = decoded_pred["images"][key]
-
-        rgb_true[key] = true_u8
-        pred_aligned = np.zeros_like(true_u8)
-        pred_aligned[trace_target_offset:] = _image_float_to_uint8_np(pred_full[0])
-        rgb_predicted[key] = pred_aligned
-
-        pmse = torch.full((T,), float("nan"), device=device, dtype=torch.float32)
-        pmse[trace_target_offset:] = (
-            pred_full.detach().float() - target[:, trace_target_offset:].float()
-        ).square().mean(dim=(2, 3, 4))[0]
-        pred_image_mse[key] = _float_tensor_np(pmse)
-
-
-    proprio_true = proprio[0].detach().float()
-    proprio_predicted = torch.full_like(proprio_true, float("nan"))
-    proprio_predicted[trace_target_offset:] = decoded_pred["proprio"][0].detach().float()
-    action_true = actions[0].detach().float()
-    action_sampled_aligned = action_sampled[0].detach().float()
-    action_sampled_chunk = action_chunk[0].detach().float()
-    valid = batch["valid_mask"][0].detach().cpu().numpy().astype(np.bool_)
-
-    def _meta_item(field: str) -> Any:
-        value = batch.get(field)
-        if isinstance(value, (list, tuple)):
-            return value[0]
-        if torch.is_tensor(value):
-            return value[0].item()
-        return ""
-
-    start_frame = int(_meta_item("start") or 0)
-    meta = {
-        "global_step": int(global_step),
-        "epoch": int(epoch),
-        "seq_len": int(T),
-        "pred_loss_active": bool(pred_loss_active),
-        "objective": "robocasa_lang_as_obs_image_state_diffusion_action",
-        "action_head_type": "diffusion",
-        "prediction_mode": "sampled_diffusion_action_then_conditioned_decode",
-        "pred_next_mode": str(pred_next_mode),
-        "trace_action_prefix_len": int(trace_action_prefix_len),
-        "trace_pred_steps": int(trace_target_offset),
-        "trace_target_offset": int(trace_target_offset),
-        "obs_stride": int(obs_stride),
-        "denoising_steps": int(trace_denoising_steps),
-        "sample_deterministic": bool(sample_deterministic),
-        "eval_seed": int(eval_seed),
-        "image_keys": list(image_keys),
-        "image_hw": list(image_hw),
-        "action_dim": ROBOCASA_ACTION_DIM,
-        "proprio_dim": ROBOCASA_PROPRIO_DIM,
-        "episode_key": str(_meta_item("episode_key")),
-        "hdf5_path": str(_meta_item("hdf5_path")),
-        "demo_key": str(_meta_item("demo_key")),
-        "lang": str(_meta_item("lang")),
-        "start_frame": int(start_frame),
-        "alignment": (
-            "rgb_predicted/<cam>[t] is the conditioned decode of the "
-            f"sampled action-prefix prediction made at t-{trace_target_offset} for t; "
-            f"the first {trace_target_offset} frame(s) are black because no previous "
-            "prediction exists. action_sampled[t] is "
-            "the first action sampled at t; action_sampled_chunk[t] is the full "
-            "sampled action chunk from t; "
-            "action_true[t] is the dataset action taken at obs[t]."
-        ),
-    }
-
-    extra_datasets: dict[str, np.ndarray] = {
-        "proprio": _float_tensor_np(proprio_true),
-        "proprio_predicted": _float_tensor_np(proprio_predicted),
-        "action_true": _float_tensor_np(action_true),
-        "action_sampled_chunk": _float_tensor_np(action_sampled_chunk),
-    }
-    warmup = np.zeros((T,), dtype=np.bool_)
-    warmup[:trace_target_offset] = True
-    return write_prediction_trace_h5(
-        path,
-        image_keys=image_keys,
-        rgb_true=rgb_true,
-        rgb_predicted=rgb_predicted,
-        pred_image_mse=pred_image_mse,
-        action_sampled=_float_tensor_np(action_sampled_aligned),
-        valid_mask=valid,
-        frame_index=start_frame + np.arange(T, dtype=np.int32) * int(obs_stride),
-        text=[str(_meta_item("lang"))] * T,
-        warmup=warmup,
-        meta=meta,
-        extra_datasets=extra_datasets,
-        fsync=True,
-    )

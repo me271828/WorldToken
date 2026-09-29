@@ -11,7 +11,6 @@ import torch
 from worldtoken.builder import build_model
 from worldtoken.config import load_config
 from worldtoken.envs import get_env_specs
-from worldtoken.specs import ActionSpec, ObsSpec
 
 
 def _forward(model) -> torch.Tensor:
@@ -32,7 +31,7 @@ def test_load_config_build_and_forward(tiny_cfg) -> None:
     h = _forward(model)
     assert tuple(h.shape) == (2, 4, model.latent_dim)
     # resolved is canonical: inline specs + sections + resolved hidden_dim
-    for key in ("model", "obs_spec", "action_spec", "encoder", "sequence_model", "action_head", "dynamics", "z_bottleneck"):
+    for key in ("model", "obs_spec", "action_spec", "encoder", "sequence_model", "action_head"):
         assert key in resolved
 
 
@@ -45,7 +44,7 @@ def test_resolved_config_roundtrip_state_dict(tiny_cfg) -> None:
 
 
 def test_recorded_disabled_reconstruction_config_still_loads(tiny_cfg) -> None:
-    model_a, resolved = build_model(tiny_cfg(pred_next=False), device="cpu")
+    model_a, resolved = build_model(tiny_cfg(), device="cpu")
     recorded = dict(resolved, recon={"enabled": False}, recon_obs=True)
     model_b, cleaned = build_model(recorded, device="cpu")
     model_b.load_state_dict(model_a.state_dict(), strict=True)
@@ -68,47 +67,9 @@ def test_d_model_separable_from_latent_dim(tiny_cfg) -> None:
     assert tuple(_forward(model).shape) == (2, 4, 64)
 
 
-def test_z_bottleneck_default_disabled_and_strict_bottleneck(tiny_cfg) -> None:
-    model_off, resolved_off = build_model(tiny_cfg(), device="cpu")
-    assert model_off.z_bottleneck is None
-    assert resolved_off["z_bottleneck"] == {"dim": None}
-
-    cfg = tiny_cfg()
-    cfg["z_bottleneck"] = {"dim": 32}
-    model_on, resolved_on = build_model(cfg, device="cpu")
-    assert model_on.z_bottleneck is not None
-    assert resolved_on["z_bottleneck"] == {"dim": 32}
-    out = model_on(*_batch_inputs(model_on), run_prediction=True)
-    assert tuple(out["z"].shape) == (2, 4, model_on.latent_dim)
-    assert tuple(out["h"].shape) == (2, 4, model_on.latent_dim)
-
-
-def test_z_bottleneck_equal_latent_dim_is_exact_bypass(tiny_cfg) -> None:
-    cfg = tiny_cfg(latent_dim=64)
-    cfg["z_bottleneck"] = {"dim": 64}
-    model, resolved = build_model(cfg, device="cpu")
-    assert model.z_bottleneck is None
-    assert resolved["z_bottleneck"] == {"dim": 64}
-    assert not any(name.startswith("z_bottleneck.") for name in model.state_dict())
-
-
-def test_env_decoupling_toy_spec() -> None:
-    # a different "environment": 2 cameras, different proprio/action -> no model code change
-    cfg = {
-        "model": {"latent_dim": 48, "action_chunk_len": 3},
-        "obs_spec": ObsSpec(image_keys=("front", "wrist"), image_hw=(16, 16),
-                            low_dim_keys=("q",), low_dim_dims=(9,), lang_dim=32).to_dict(),
-        "action_spec": ActionSpec(dim=7, discrete_dims=(6,)).to_dict(),
-        "encoder": {"type": "shallow_cnn_late_fusion",
-                    "params": {"image_emb_dim": 16, "proprio_emb_dim": 8, "lang_obs_emb_dim": 8,
-                               "cnn_depth": 4, "cnn_mults": [2, 3], "cnn_kernel": 3}},
-        "sequence_model": {"type": "continuous_transformer", "backbone_type": "qwen2", "hidden_dim": 48,
-                           "params": {"n_layers": 1, "n_heads": 2, "n_kv_heads": 1, "ffn_hidden_size": 64,
-                                      "max_context_len": 16, "input_norm": False, "attn_impl": "eager"}},
-        "action_head": {"type": "diffusion", "params": {"denoising_steps": 3, "mlp_dims": [32, 32, 32]}},
-        "dynamics": {"enabled": False},
-        "objective": "robocasa_lang_as_obs_image_state_diffusion_action",
-    }
+def test_env_decoupling_toy_spec(tiny_cfg) -> None:
+    cfg = tiny_cfg(latent_dim=48, d_model=48, image_keys=("front", "wrist"),
+                   low_dim_dims=(9,), lang_dim=32, action_dim=7, discrete_dims=(6,), action_chunk_len=3)
     model, _ = build_model(cfg, device="cpu")
     assert model.image_keys == ("front", "wrist") and model.action_dim == 7
     assert tuple(_forward(model).shape) == (2, 4, 48)
@@ -126,18 +87,17 @@ def test_reconcile_args_from_config(tiny_cfg) -> None:
     from worldtoken.train_bc import _reconcile_args_with_config
 
     cfg = load_config(tiny_cfg(action_chunk_len=7))
-    args = SimpleNamespace(action_chunk_len=3, max_context_len=999, enable_pred_next=False, use_proprio=True)
+    args = SimpleNamespace(action_chunk_len=3, max_context_len=999,  use_proprio=True)
     _reconcile_args_with_config(args, cfg)
     assert args.action_chunk_len == 7          # config wins (would have crashed the dataset)
     assert args.max_context_len == 64          # from sequence_model.params
-    assert args.enable_pred_next is True        # tiny_cfg enables dynamics
 
     # config omits max_context_len -> fall back to the transformer default, NOT the CLI arg
     from worldtoken.transformer import DEFAULT_MAX_CONTEXT_LEN
 
     raw = tiny_cfg()
     del raw["sequence_model"]["params"]["max_context_len"]
-    args2 = SimpleNamespace(action_chunk_len=4, max_context_len=2048, enable_pred_next=True, use_proprio=True)
+    args2 = SimpleNamespace(action_chunk_len=4, max_context_len=2048,  use_proprio=True)
     _reconcile_args_with_config(args2, load_config(raw))
     assert args2.max_context_len == DEFAULT_MAX_CONTEXT_LEN  # matches the model's real default, not 2048
 
@@ -166,3 +126,22 @@ def test_encoder_guards_fail_loud(tiny_cfg) -> None:
 
     with pytest.raises(ValueError):
         build_model(tiny_cfg(lang_dim=-1), device="cpu")
+
+
+def test_recorded_disabled_exploration_fields_preserve_checkpoint(tiny_cfg) -> None:
+    import pytest
+
+    model, resolved = build_model(tiny_cfg(), device="cpu")
+    recorded = dict(resolved, dynamics={"enabled": False, "type": "none"},
+                    z_bottleneck={"dim": None}, enable_pred_next=False, lora=False)
+    recorded["action_head"] = {**resolved["action_head"], "params": {
+        **resolved["action_head"]["params"], "use_obs_cross_attn": False,
+        "use_h_cross_attn": False, "h_adaln_bottleneck": False,
+    }}
+    rebuilt, cleaned = build_model(recorded, device="cpu")
+    rebuilt.load_state_dict(model.state_dict(), strict=True)
+    assert "dynamics" not in cleaned and "z_bottleneck" not in cleaned
+    for enabled in ({"dynamics": {"enabled": True}}, {"enable_pred_next": True},
+                    {"z_bottleneck": {"dim": 16}}, {"lora": True}):
+        with pytest.raises(ValueError, match="no longer supported"):
+            load_config(dict(recorded, **enabled))

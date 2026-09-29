@@ -6,11 +6,8 @@
       "denoising_steps": 20,
       "dim_feedforward": 768,
       "dropout": 0.0,
-      "h_adaln_bottleneck": false,
       "n_heads": 6,
-      "n_layers": 2,
-      "use_h_cross_attn": false,
-      "use_obs_cross_attn": false
+      "n_layers": 2
     },
     "type": "diffusion_dit"
   },
@@ -26,11 +23,6 @@
   "crops_per_episode": 1,
   "dataset_root": "${DATA_ROOT}/rmbench",
   "device": "cuda",
-  "dynamics": {
-    "enabled": false,
-    "params": {},
-    "type": "none"
-  },
   "encoder": {
     "params": {
       "d_model": 768,
@@ -132,9 +124,6 @@
   ],
   "warmup_steps": 250,
   "weight_decay": 0.0,
-  "z_bottleneck": {
-    "dim": null
-  },
   "env": "rmbench",
   "paper": {
     "seed": 1,

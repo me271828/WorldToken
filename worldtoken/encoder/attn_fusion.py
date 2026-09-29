@@ -1,12 +1,8 @@
 """Attention-fusion observation encoder (fuse-before-pool, 2D vision RoPE).
 
-Unlike ``shallow_cnn_late_fusion`` -- which pools each camera's feature map to a
-single vector *before* fusing, so the spatial structure (and any language-object
-correspondence) is destroyed at the bottleneck -- this encoder keeps every
-camera's spatial patch tokens, lets language + proprio + all patches interact in
-a small global self-attention stack, then pools to ONE continuous vector per
-timestep with one or more learned readout queries. Output still satisfies the
-``ObservationEncoder`` contract ``z[B, T, latent_dim]``.
+Camera patch tokens, language and proprioception interact in a within-timestep
+fusion stack. The latent-token encoder returns one continuous world token; its
+multi-token and raw-token variants provide the paper's token-interface ablations.
 
 Position/identity encoding:
 * image patches: 2D vision RoPE (copied from Qwen2-VL) on the ``(h, w)`` grid;
@@ -216,9 +212,6 @@ class _FusionLayer(nn.Module):
 
 
 class AttnFusionObservationEncoder(ObservationEncoder):
-    # Spatial-token encoder: exposes obs tokens via encode(return_obs_tokens=True).
-    provides_obs_tokens = True
-    OBS_TOKEN_SOURCES = ("post_fusion", "pre_fusion")
 
     def __init__(
         self,
@@ -484,12 +477,6 @@ class AttnFusionObservationEncoder(ObservationEncoder):
             "shared" if self.shared_image_encoder else key
         ]
 
-    @classmethod
-    def _normalize_obs_tokens_source(cls, source: str) -> str:
-        source = str(source)
-        if source not in cls.OBS_TOKEN_SOURCES:
-            raise ValueError(f"obs_tokens_source must be one of {cls.OBS_TOKEN_SOURCES}, got {source!r}")
-        return source
 
     def _validate_obs(
         self,
@@ -549,9 +536,7 @@ class AttnFusionObservationEncoder(ObservationEncoder):
         Each camera is drawn independently, and within a camera each ``(b, t)``
         frame gets its own shift -- the same granularity as Diffusion Policy,
         which folds time into the batch and runs a separate ``CropRandomizer``
-        per rgb key. ``encode_image_tokens`` deliberately does NOT augment: it
-        produces the next-frame *targets* for token-translator dynamics, which
-        must stay pixel-aligned with the raw observation.
+        per rgb key.
         """
         if self.image_random_shift_pad <= 0 or not self.training:
             return frames
@@ -644,58 +629,10 @@ class AttnFusionObservationEncoder(ObservationEncoder):
         return z.view(b, t, self.latent_dim)
 
     def encode(
-        self,
-        images: dict[str, torch.Tensor],
-        proprio: torch.Tensor,
-        lang_emb: torch.Tensor,
-        *,
-        return_obs_tokens: bool = False,
-        obs_tokens_source: str = "post_fusion",
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Encode to ``z[B,T,latent]``; optionally also return obs tokens.
-
-        With ``return_obs_tokens=True`` returns ``(z, obs_tokens)`` where
-        ``obs_tokens`` is the full sequence ``[B, T, N, d_model]`` (image patches
-        + proprio + optional language) for an action head's cross-attention.
-        ``obs_tokens_source="post_fusion"`` exports the language/proprio-grounded
-        tokens after the fusion stack; ``"pre_fusion"`` exports the projected
-        tokens before global fusion. The CNN path runs once for both ``z`` and
-        exported tokens.
-        """
-        if return_obs_tokens:
-            obs_tokens_source = self._normalize_obs_tokens_source(obs_tokens_source)
-            pre_seq, seq, b, t = self._fuse_with_pre_tokens(images, proprio, lang_emb)
-        else:
-            seq, b, t = self._fuse(images, proprio, lang_emb)
-            pre_seq = None
-        z = self._readout(seq, b, t)
-        if not return_obs_tokens:
-            return z
-        obs_seq = pre_seq if obs_tokens_source == "pre_fusion" else seq
-        obs_tokens = obs_seq.view(b, t, obs_seq.shape[1], self.d_model)
-        return z, obs_tokens
-
-    def encode_image_tokens(self, images: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Fusion-PRE per-camera image tokens ``[B, T, num_cam*P, d_model]``.
-
-        Same per-camera path as ``encode`` up to (but excluding) the fusion stack:
-        CNN spatial patches -> ``img_proj`` -> + image-modality + camera-id
-        embeddings. No cross-token/cross-modal fusion, no pooling. Consumed by the
-        token-translator dynamics as the next-frame base. Token order is
-        ``[cam0's P, cam1's P, ...]`` (per-camera row-major), matching ``encode``.
-        """
-        tokens: list[torch.Tensor] = []
-        b = t = 0
-        for cam_idx, key in enumerate(self.image_keys):
-            if key not in images:
-                raise KeyError(f"missing image key {key!r}")
-            patches = self._image_encoder(key).forward_spatial(images[key])  # [B,T,P,C]
-            b, t = int(patches.shape[0]), int(patches.shape[1])
-            patches = patches.view(b * t, self.patches_per_cam, -1)
-            patches = self.img_proj(patches)  # [B*T, P, d]
-            patches = patches + self.modal_emb[0] + self.cam_id_emb[cam_idx]
-            tokens.append(patches.view(b, t, self.patches_per_cam, self.d_model))
-        return torch.cat(tokens, dim=2)  # [B, T, num_cam*P, d_model]
+        self, images: dict[str, torch.Tensor], proprio: torch.Tensor, lang_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        seq, b, t = self._fuse(images, proprio, lang_emb)
+        return self._readout(seq, b, t)
 
 
 class AttnFusionLatentTokenObservationEncoder(AttnFusionObservationEncoder):
@@ -704,7 +641,7 @@ class AttnFusionLatentTokenObservationEncoder(AttnFusionObservationEncoder):
     This is the structural ablation of the Q-Former readout: learned readout
     tokens are appended to the obs sequence *before* fusion, so ``z`` queries the
     evolving obs representation at every fusion layer. A block mask keeps the obs
-    token path clean for ``return_obs_tokens=True``:
+    representation independent of the learned readout:
 
     * obs tokens attend bidirectionally to obs tokens;
     * latent/readout tokens attend to obs tokens;
@@ -793,36 +730,7 @@ class AttnFusionLatentTokenObservationEncoder(AttnFusionObservationEncoder):
         return z.view(b, t, self.latent_dim)
 
     def encode(
-        self,
-        images: dict[str, torch.Tensor],
-        proprio: torch.Tensor,
-        lang_emb: torch.Tensor,
-        *,
-        return_obs_tokens: bool = False,
-        obs_tokens_source: str = "post_fusion",
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        obs_tokens_source = self._normalize_obs_tokens_source(obs_tokens_source) if return_obs_tokens else "post_fusion"
-        pre_obs_seq = None
-        if return_obs_tokens and obs_tokens_source == "pre_fusion":
-            pre_obs_seq, b, t = self._build_obs_tokens(images, proprio, lang_emb)
-            bt = b * t
-            readout = self.readout_q.expand(bt, -1, -1)
-            seq = torch.cat([pre_obs_seq, readout], dim=1)
-            for idx, layer in enumerate(self.fusion):
-                seq = layer(
-                    seq,
-                    self.latent_token_freqs,
-                    attn_mask=self.latent_token_attn_mask,
-                    attn_no_residual_from=self._latent_attn_no_residual_from(idx),
-                )
-            if self.fusion_norm is not None:
-                seq = self.fusion_norm(seq)
-        else:
-            seq, b, t = self._fuse(images, proprio, lang_emb)
-        z = self._readout(seq, b, t)
-        if not return_obs_tokens:
-            return z
-        obs_n = int(self.token_freqs.shape[0])
-        obs_seq = pre_obs_seq if pre_obs_seq is not None else seq[:, :obs_n, :]
-        obs_tokens = obs_seq.view(b, t, obs_n, self.d_model)
-        return z, obs_tokens
+        self, images: dict[str, torch.Tensor], proprio: torch.Tensor, lang_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        seq, b, t = self._fuse(images, proprio, lang_emb)
+        return self._readout(seq, b, t)

@@ -4,23 +4,13 @@ from __future__ import annotations
 
 from worldtoken.encoder.attn_fusion import AttnFusionLatentTokenObservationEncoder, AttnFusionObservationEncoder
 from worldtoken.encoder.base import ObservationEncoder
-from worldtoken.encoder.cnn import ImageEncoderCNN, ImagePatchEncoder, MLPEncoder
+from worldtoken.encoder.cnn import ImageEncoderCNN, ImagePatchEncoder
 from worldtoken.encoder.multi_token import AttnFusionMultiTokenObservationEncoder
 from worldtoken.encoder.rmbench import RMBenchPatchLatentTokenObservationEncoder
-from worldtoken.encoder.robocasa import RoboCasaObservationEncoder
 from worldtoken.encoder.raw_token import AttnFusionRawTokenObservationEncoder
-from worldtoken.encoder.robocasa_visual import (
-    RoboCasaVisualFiLMEncoder,
-)
 from worldtoken.specs import ObsSpec
 
 ENCODER_REGISTRY: dict[str, type[ObservationEncoder]] = {
-    # DEPRECATED (legacy, unmaintained): pools each camera before fusing, losing
-    # spatial structure. Prefer "attn_fusion". Kept for old configs/checkpoints.
-    "shallow_cnn_late_fusion": RoboCasaObservationEncoder,
-    "robocasa": RoboCasaObservationEncoder,  # backward-compatible alias (deprecated)
-    "robocasa_visual_film": RoboCasaVisualFiLMEncoder,
-    # Maintained / primary observation encoder going forward:
     "attn_fusion": AttnFusionObservationEncoder,
     "attn_fusion_latent_token": AttnFusionLatentTokenObservationEncoder,
     "attn_fusion_multi_token": AttnFusionMultiTokenObservationEncoder,
@@ -39,8 +29,6 @@ def build_encoder(cfg, *, obs_spec: ObsSpec, latent_dim: int) -> ObservationEnco
 
 __all__ = [
     "ObservationEncoder",
-    "RoboCasaObservationEncoder",
-    "RoboCasaVisualFiLMEncoder",
     "AttnFusionObservationEncoder",
     "AttnFusionLatentTokenObservationEncoder",
     "AttnFusionMultiTokenObservationEncoder",
@@ -48,7 +36,6 @@ __all__ = [
     "ImageEncoderCNN",
     "ImagePatchEncoder",
     "RMBenchPatchLatentTokenObservationEncoder",
-    "MLPEncoder",
     "ENCODER_REGISTRY",
     "build_encoder",
 ]

@@ -54,13 +54,10 @@ WorldToken/
 └── worldtoken/                       # Importable Python package
     ├── encoder/                      # RGB, proprioception and language/task encoders
     ├── transformer/                  # Causal temporal models and token ordering
-    ├── action_head/                  # Diffusion action heads and normalization
-    ├── dynamics/                     # Optional future-observation prediction
+    ├── action_head/                  # DiT diffusion action head and normalization
     ├── envs/                         # RoboCasa specifications and simulation adapters
-    ├── training/                     # Holdout metrics and action/prediction traces
-    ├── configs/                      # 12 general development examples
+    ├── training/                     # Holdout metrics and offline action-error traces
     ├── tests/                        # Model, data and evaluation regression tests
-    ├── third_party/dppo/             # Small BC diffusion-model subset and its license
     ├── config.py, builder.py          # Parse configurations and assemble a model
     ├── model.py, specs.py             # Model interface and observation/action shapes
     ├── data.py, rmbench_data.py       # Demonstration loading and temporal sampling
@@ -71,9 +68,8 @@ WorldToken/
     └── rmbench_policy.py             # RMBench history and action-chunk execution
 ```
 
-Every result directory has its own README. Use `experiments/*/configs/` to
-reproduce the paper: the files in `worldtoken/configs/` are general modeling
-examples and do not define the paper runs. The
+Every result directory has its own README. The 69 recipes in
+`experiments/*/configs/` are the configuration entry points for the paper. The
 [package guide](worldtoken/README.md) describes the remaining utility files.
 
 `runs/`, `results/` and `external/` are created locally for generated runs,
@@ -91,14 +87,11 @@ demonstrations and the companion records dataset are supplied separately.
 | Run RMBench formal history comparisons and continuation after success | `experiments.07_long_history_rmbench.evaluate` |
 | Recompute the four results' tables, numerical figures and behavioral analyses | Section `summarize` modules; `experiments.common.plot` |
 | Compare token-interface compute and count model parameters | `experiments.05_token_interface.compute` |
-| Explore optional dynamics, encoder, temporal-model and action-head variants | Components and example configurations in `worldtoken/` |
+| Batch-recompute offline RMSE and verify saved action-error traces | `worldtoken.launch_holdout_rmse_batch`; `worldtoken.validate_holdout_action_trace` |
 
-The optional components include FiLM, transition, patch-DiT and token-translator
-dynamics; MLP and U-Net diffusion heads; current-observation and history-conditioned
-DiT variants; and additional temporal backbones. These are separate from the
-paper recipes. RL, observation autoencoder reconstruction and the standalone
-robomimic benchmark workflows are not included. RoboCasa's language encoder and
-native BC baseline still use the external robomimic library.
+WorldToken policies use the paper's observation encoders, Qwen2 temporal backbone
+and DiT action head. Training optimizes action generation. RoboCasa's language
+encoder and the native BC-Transformer baseline use the external robomimic library.
 
 ## Setup and data
 

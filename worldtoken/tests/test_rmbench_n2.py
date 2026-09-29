@@ -30,7 +30,7 @@ from worldtoken.train_rmbench import (
 )
 
 
-CONFIG = Path(__file__).resolve().parents[1] / "configs" / "rmbench_9task.yaml"
+CONFIG = Path(__file__).resolve().parents[2] / "experiments/07_long_history_rmbench/configs/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4.json"
 
 
 def test_rmbench_config_is_n2_without_action_spatial_bypass() -> None:
@@ -49,8 +49,8 @@ def test_rmbench_config_is_n2_without_action_spatial_bypass() -> None:
     assert config.action_head.type == "diffusion_dit"
     assert config.action_head.params["d_model"] == 192
     assert config.action_head.params["n_layers"] == 2
-    assert config.action_head.params["use_obs_cross_attn"] is False
-    assert config.action_head.params["use_h_cross_attn"] is False
+    assert not config.action_head.params.get("use_obs_cross_attn", False)
+    assert not config.action_head.params.get("use_h_cross_attn", False)
 
 
 def test_patch20_encoder_uses_shared_projection_and_expected_grid() -> None:
@@ -79,12 +79,9 @@ def test_patch20_encoder_uses_shared_projection_and_expected_grid() -> None:
     images = {key: torch.zeros((1, 2, 40, 60, 3), dtype=torch.uint8) for key in RMBENCH_IMAGE_KEYS}
     proprio = torch.zeros((1, 2, RMBENCH_ACTION_DIM))
     lang = torch.zeros((1, 2, RMBENCH_LANG_DIM))
-    z, obs_tokens = encoder.encode(
-        images,
-        proprio,
-        lang,
-        return_obs_tokens=True,
-    )
+    z = encoder.encode(images, proprio, lang)
+    obs_tokens, b, t = encoder._build_obs_tokens(images, proprio, lang)
+    obs_tokens = obs_tokens.view(b, t, -1, encoder.d_model)
     assert z.shape == (1, 2, 24)
     # 3 cameras * 6 patches + one proprio + one task token.
     assert obs_tokens.shape == (1, 2, 20, 24)

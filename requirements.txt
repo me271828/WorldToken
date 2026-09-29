@@ -8,8 +8,6 @@ h5py
 pyyaml
 
 # Training extras
-peft
-einops
 tqdm
 opencv-python-headless>=4.8,<5
 

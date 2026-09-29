@@ -1,16 +1,12 @@
 {
   "action_chunk_len": 10,
-  "action_decoder_emb": 256,
   "action_head": {
     "params": {
       "d_model": 128,
       "denoising_steps": 20,
       "dropout": 0.0,
-      "h_adaln_bottleneck": false,
       "n_heads": 4,
-      "n_layers": 1,
-      "use_h_cross_attn": false,
-      "use_obs_cross_attn": false
+      "n_layers": 1
     },
     "type": "diffusion_dit"
   },
@@ -70,22 +66,8 @@
   "ddp_timeout_minutes": 180.0,
   "denoising_steps": 20,
   "device": "cuda",
-  "diffusion_mlp_dims": [
-    1024,
-    1024,
-    1024
-  ],
-  "diffusion_residual_style": true,
-  "diffusion_time_dim": 16,
   "dropout": 0.1,
   "dry_run_data": false,
-  "dynamics": {
-    "enabled": false,
-    "params": {},
-    "type": "none"
-  },
-  "dynamics_decoder_type": "film",
-  "enable_pred_next": false,
   "encoder": {
     "params": {
       "cnn_depth": 48,
@@ -188,14 +170,6 @@
   "output_dir": "${RUNS_ROOT}/04_robocasa_scaling/phase1grid_d50_n1_nodyn_seed0_5k_cuda6",
   "persistent_workers": true,
   "precision": "bf16",
-  "pred_next_image_key_weights": {},
-  "pred_next_image_weight": 1.0,
-  "pred_next_lang_weight": 0.1,
-  "pred_next_mode": "terminal",
-  "pred_next_obs_offset": 1,
-  "pred_next_proprio_weight": 0.15,
-  "pred_next_steps": 4,
-  "pred_warmup_steps": 0,
   "predictor_lr": 0.0006,
   "prefetch_factor": 4,
   "prepare_lang_cache_only": false,
@@ -205,7 +179,6 @@
   "resume_lr_schedule": "checkpoint",
   "robomimic_src": null,
   "save_every": 500,
-  "save_holdout_traces": true,
   "save_latest_checkpoint": true,
   "seed": 0,
   "seq_len": 10,
@@ -228,9 +201,6 @@
   "use_proprio": true,
   "warmup_steps": 250,
   "weight_decay": 0.0,
-  "z_bottleneck": {
-    "dim": null
-  },
   "env": "robocasa",
   "eval_window_spec": "${CODE_ROOT}/experiments/common/eval_windows/c10_02.json.gz",
   "paper": {

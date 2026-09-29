@@ -28,7 +28,7 @@ class ModelConfig:
 
 @dataclass
 class EncoderConfig:
-    type: str = "attn_fusion"  # maintained default; "shallow_cnn_late_fusion" is deprecated
+    type: str = "attn_fusion_latent_token"
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -42,22 +42,8 @@ class SequenceModelConfig:
 
 @dataclass
 class ActionHeadConfig:
-    type: str = "diffusion"
+    type: str = "diffusion_dit"
     params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DynamicsConfig:
-    enabled: bool = True
-    type: str = "film"
-    params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ZBottleneckConfig:
-    # None disables the module. dim == model.latent_dim is treated as an exact
-    # bypass by the builder, so the b=2048 E5 baseline has no extra parameters.
-    dim: int | None = None
 
 
 @dataclass
@@ -66,8 +52,6 @@ class BuildConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     sequence_model: SequenceModelConfig = field(default_factory=SequenceModelConfig)
     action_head: ActionHeadConfig = field(default_factory=ActionHeadConfig)
-    dynamics: DynamicsConfig = field(default_factory=DynamicsConfig)
-    z_bottleneck: ZBottleneckConfig = field(default_factory=ZBottleneckConfig)
     # data semantics: either a registered env name OR inline specs (inline wins).
     env: str | None = "robocasa"
     obs_spec: ObsSpec | None = None
@@ -86,17 +70,6 @@ def _split(d: dict[str, Any], reserved: tuple[str, ...]) -> tuple[dict[str, Any]
 def _known_dataclass_fields(cls: type, values: dict[str, Any]) -> dict[str, Any]:
     allowed = {f.name for f in fields(cls)}
     return {k: v for k, v in dict(values or {}).items() if k in allowed}
-
-
-def _load_z_bottleneck(raw_value: Any) -> ZBottleneckConfig:
-    if raw_value is None:
-        return ZBottleneckConfig()
-    if isinstance(raw_value, int):
-        return ZBottleneckConfig(dim=int(raw_value))
-    if isinstance(raw_value, dict):
-        values = _known_dataclass_fields(ZBottleneckConfig, raw_value)
-        return ZBottleneckConfig(**values)
-    raise TypeError(f"z_bottleneck must be null, int, or mapping, got {type(raw_value).__name__}")
 
 
 def load_config(src: str | Path | dict[str, Any]) -> BuildConfig:
@@ -122,19 +95,26 @@ def load_config(src: str | Path | dict[str, Any]) -> BuildConfig:
     )
 
     ah_res, ah_params = _split(raw.get("action_head", {}), ("type",))
+    # Old paper configs explicitly recorded these disabled branches.
+    for key in ("use_obs_cross_attn", "use_h_cross_attn", "h_adaln_bottleneck"):
+        if ah_params.pop(key, False):
+            raise ValueError(f"Action-head option {key} is no longer supported")
     action_head = ActionHeadConfig(type=ah_res.get("type", ActionHeadConfig.type), params=ah_params)
 
     # Recorded action-only checkpoints may still contain this disabled field.
     if (raw.get("recon") or {}).get("enabled", raw.get("recon_obs", False)):
         raise ValueError("Observation reconstruction is no longer supported")
 
-    dy_res, dy_params = _split(raw.get("dynamics", {}), ("enabled", "type"))
-    dynamics = DynamicsConfig(
-        enabled=bool(dy_res.get("enabled", True)),
-        type=dy_res.get("type", DynamicsConfig.type),
-        params=dy_params,
-    )
-    z_bottleneck = _load_z_bottleneck(raw.get("z_bottleneck"))
+    # Accept disabled fields in recorded paper checkpoints, but never silently
+    # load a checkpoint that relied on a removed architecture.
+    if (raw.get("dynamics") or {}).get("enabled", False) or raw.get("enable_pred_next", False):
+        raise ValueError("Future-observation prediction is no longer supported")
+    bottleneck = raw.get("z_bottleneck")
+    bottleneck_dim = bottleneck.get("dim") if isinstance(bottleneck, dict) else bottleneck
+    if bottleneck_dim is not None and int(bottleneck_dim) != int(model.latent_dim):
+        raise ValueError("Additional latent bottlenecks are no longer supported")
+    if raw.get("lora", False):
+        raise ValueError("LoRA checkpoints are no longer supported")
 
     obs_spec = ObsSpec.from_dict(raw["obs_spec"]) if raw.get("obs_spec") else None
     action_spec = ActionSpec.from_dict(raw["action_spec"]) if raw.get("action_spec") else None
@@ -145,8 +125,6 @@ def load_config(src: str | Path | dict[str, Any]) -> BuildConfig:
         encoder=encoder,
         sequence_model=sequence_model,
         action_head=action_head,
-        dynamics=dynamics,
-        z_bottleneck=z_bottleneck,
         env=env if env is not None else ("robocasa" if obs_spec is None else None),
         obs_spec=obs_spec,
         action_spec=action_spec,

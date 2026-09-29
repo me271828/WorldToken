@@ -1,9 +1,4 @@
-"""Encoder-side neural blocks (lifted verbatim).
-
-``ImageEncoderCNN`` (from the old cnn.py) + ``MLPEncoder`` (from robocasa_blocks).
-Each maps one observation stream to a fixed-width embedding; fusion to a single
-vector/timestep happens in ``robocasa.py``.
-"""
+"""CNN and patch stems shared by the paper observation encoders."""
 
 from __future__ import annotations
 
@@ -191,21 +186,3 @@ class ImagePatchEncoder(nn.Module):
     @property
     def num_patches(self) -> int:
         return int(self.final_hw[0] * self.final_hw[1])
-
-
-class MLPEncoder(nn.Module):
-    def __init__(self, *, in_dim: int, hidden: int, out_dim: int) -> None:
-        super().__init__()
-        self.in_dim = int(in_dim)
-        self.out_dim = int(out_dim)
-        self.net = nn.Sequential(
-            nn.Linear(self.in_dim, int(hidden)),
-            nn.SiLU(),
-            nn.Linear(int(hidden), self.out_dim),
-            nn.SiLU(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3 or x.shape[-1] != self.in_dim:
-            raise ValueError(f"expected [B,T,{self.in_dim}], got {tuple(x.shape)}")
-        return self.net(x.float())

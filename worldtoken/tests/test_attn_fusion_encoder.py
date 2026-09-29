@@ -128,7 +128,9 @@ def test_explicit_cnn_channels_reject_patch_encoder() -> None:
 def test_no_language_forward_has_no_projection_or_language_token() -> None:
     enc = _no_lang_encoder()
     images, proprio, lang_emb = _no_lang_inputs()
-    z, obs_tokens = enc.encode(images, proprio, lang_emb, return_obs_tokens=True)
+    z = enc.encode(images, proprio, lang_emb)
+    obs_tokens, b, t = enc._build_obs_tokens(images, proprio, lang_emb)
+    obs_tokens = obs_tokens.view(b, t, -1, enc.d_model)
 
     expected_obs_tokens = enc.num_cameras * enc.patches_per_cam + 1  # proprio only
     assert enc.lang_proj is None
@@ -158,7 +160,9 @@ def test_no_language_latent_token_freqs_and_mask_match_observation_count() -> No
     assert enc.latent_token_freqs.shape[0] == expected_total
     assert tuple(enc.latent_token_attn_mask.shape) == (1, 1, expected_total, expected_total)
 
-    z, obs_tokens = enc.encode(*_no_lang_inputs(), return_obs_tokens=True)
+    z = enc.encode(*_no_lang_inputs())
+    obs_tokens, b, t = enc._build_obs_tokens(*_no_lang_inputs())
+    obs_tokens = obs_tokens.view(b, t, -1, enc.d_model)
     assert tuple(z.shape) == (2, 3, 32)
     assert tuple(obs_tokens.shape) == (2, 3, expected_obs_tokens, enc.d_model)
 
@@ -183,7 +187,9 @@ def test_no_language_without_proprio_infers_bt_from_images() -> None:
     images, _, lang_emb = _no_lang_inputs(B=2, T=3)
     # Proprio is intentionally not a [B,T,D] tensor: it is outside this model's
     # observation contract when use_proprio=False, so images anchor B and T.
-    z, obs_tokens = enc.encode(images, torch.empty(0), lang_emb, return_obs_tokens=True)
+    z = enc.encode(images, torch.empty(0), lang_emb)
+    obs_tokens, b, t = enc._build_obs_tokens(images, torch.empty(0), lang_emb)
+    obs_tokens = obs_tokens.view(b, t, -1, enc.d_model)
     expected_obs_tokens = enc.num_cameras * enc.patches_per_cam
     assert enc.proprio_proj is None
     assert enc.token_freqs.shape[0] == expected_obs_tokens
@@ -244,7 +250,9 @@ def test_positive_language_projection_state_dict_and_token_count_are_preserved()
     # and remain strict-loadable into the unchanged positive-language path.
     clone = _encoder(latent_dim=32)
     clone.load_state_dict(state, strict=True)
-    _, obs_tokens = clone.encode(*_inputs(), return_obs_tokens=True)
+    _ = clone.encode(*_inputs())
+    obs_tokens, b, t = clone._build_obs_tokens(*_inputs())
+    obs_tokens = obs_tokens.view(b, t, -1, clone.d_model)
     assert obs_tokens.shape[2] == expected_obs_tokens
 
 
@@ -347,20 +355,6 @@ def test_latent_token_learned_query_residual_can_be_disabled_only_on_first_layer
 
     assert tuple(z.shape) == (1, 1, 32)
     assert calls == [(0, obs_n), (1, None), (2, None)]
-
-
-def test_latent_token_obs_tokens_exclude_latents_and_do_not_depend_on_readout_q() -> None:
-    enc = _encoder(latent_dim=32, encoder_type="attn_fusion_latent_token", readout_queries=2)
-    images, proprio, lang_emb = _inputs(B=2, T=3)
-    z1, obs1 = enc.encode(images, proprio, lang_emb, return_obs_tokens=True)
-    with torch.no_grad():
-        enc.readout_q.add_(10.0)
-    z2, obs2 = enc.encode(images, proprio, lang_emb, return_obs_tokens=True)
-
-    expected_n = enc.num_cameras * enc.patches_per_cam + 2
-    assert tuple(obs1.shape) == (2, 3, expected_n, enc.d_model)
-    assert torch.equal(obs1, obs2)
-    assert not torch.equal(z1, z2)
 
 
 def test_readout_depth_stack() -> None:
@@ -549,66 +543,6 @@ def test_rope_constraints_raise() -> None:
         _encoder(readout_queries=0)
 
 
-def test_provides_obs_tokens_flag() -> None:
-    # attn_fusion advertises the obs-token capability; the base default is False.
-    assert AttnFusionObservationEncoder.provides_obs_tokens is True
-    assert ObservationEncoder.provides_obs_tokens is False
-    assert _encoder(latent_dim=32).provides_obs_tokens is True
-
-
-def test_encode_return_obs_tokens_shape_and_z_unchanged() -> None:
-    enc = _encoder(latent_dim=32)
-    images, proprio, lang_emb = _inputs(B=2, T=3)
-    z_only = enc.encode(images, proprio, lang_emb)
-    z, obs_tokens = enc.encode(images, proprio, lang_emb, return_obs_tokens=True)
-
-    # z is byte-for-byte the same whether or not tokens are exported (shared fusion).
-    assert torch.equal(z, z_only)
-    assert tuple(z.shape) == (2, 3, 32)
-
-    # obs_tokens = full fusion-POST sequence: 3 cams * patches + proprio + lang.
-    expected_n = enc.num_cameras * enc.patches_per_cam + 2  # use_proprio default True
-    assert tuple(obs_tokens.shape) == (2, 3, expected_n, enc.d_model)
-    assert obs_tokens.dtype == torch.float32
-    assert torch.isfinite(obs_tokens).all()
-
-
-def test_encode_return_pre_fusion_obs_tokens() -> None:
-    enc = _encoder(latent_dim=32)
-    images, proprio, lang_emb = _inputs(B=2, T=3)
-    z_only = enc.encode(images, proprio, lang_emb)
-    z, obs_tokens = enc.encode(
-        images,
-        proprio,
-        lang_emb,
-        return_obs_tokens=True,
-        obs_tokens_source="pre_fusion",
-    )
-    pre_seq, b, t = enc._build_obs_tokens(images, proprio, lang_emb)
-    expected = pre_seq.view(b, t, pre_seq.shape[1], enc.d_model)
-
-    assert torch.equal(z, z_only)
-    assert torch.equal(obs_tokens, expected)
-    assert tuple(obs_tokens.shape) == (2, 3, enc.num_cameras * enc.patches_per_cam + 2, enc.d_model)
-
-
-def test_encode_rejects_unknown_obs_tokens_source() -> None:
-    enc = _encoder(latent_dim=32)
-    images, proprio, lang_emb = _inputs()
-    with pytest.raises(ValueError):
-        enc.encode(images, proprio, lang_emb, return_obs_tokens=True, obs_tokens_source="middle_fusion")
-
-
-def test_obs_tokens_grads_flow() -> None:
-    enc = _encoder(latent_dim=32)
-    images, proprio, lang_emb = _inputs()
-    _, obs_tokens = enc.encode(images, proprio, lang_emb, return_obs_tokens=True)
-    obs_tokens.sum().backward()
-    # fusion-stack params receive gradient via the token path (readout is bypassed).
-    assert enc.img_proj.weight.grad is not None and torch.isfinite(enc.img_proj.weight.grad).all()
-    assert enc.fusion[0].attn.proj.weight.grad is not None
-
-
 def test_integration_in_full_model(tiny_cfg) -> None:
     cfg = tiny_cfg()
     cfg["encoder"] = {
@@ -634,7 +568,7 @@ def test_integration_in_full_model(tiny_cfg) -> None:
     assert tuple(out["h"].shape) == (B, T, model.latent_dim)
 
     total, metrics = robocasa_diffusion_action_objective(
-        model=model, batch=batch, include_pred_loss=True, pred_next_steps=1, compute_metrics=True
+        model=model, batch=batch,   compute_metrics=True
     )
     assert torch.isfinite(total)
     total.backward()

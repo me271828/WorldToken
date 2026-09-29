@@ -1,8 +1,6 @@
 """Train RoboCasa language-as-observation diffusion action model.
 
-This is a RoboCasa-only training entrypoint. It mirrors the structure of
-``train_lee_image_state_fm_action.py`` but does not share its data or model
-interfaces, so existing Lee training behavior is untouched.
+Paper configurations and launch commands are provided in ``experiments/``.
 """
 
 from __future__ import annotations
@@ -30,10 +28,6 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from worldtoken.constants import (
-    DEFAULT_ROBOCASA_ACTION_DECODER_EMB,
-    DEFAULT_ROBOCASA_IMAGE_EMB_DIM,
-    DEFAULT_ROBOCASA_LANG_OBS_EMB_DIM,
-    DEFAULT_ROBOCASA_PROPRIO_EMB_DIM,
     LATENT_DIM,
 )
 from worldtoken import paths
@@ -45,16 +39,14 @@ from worldtoken.training.holdout import (
     set_action_normalizer_from_stats,
     summarize_holdout_eval_rows,
     task_macro_metrics,
-    write_robocasa_holdout_prediction_trace,
 )
 from worldtoken.layers import count_parameters
-from worldtoken.envs.robocasa import ROBOCASA_ACTION_RMSE_GROUPS, ROBOCASA_IMAGE_KEYS
+from worldtoken.envs.robocasa import ROBOCASA_ACTION_RMSE_GROUPS
 from worldtoken.builder import build_model
 from worldtoken.transformer import DEFAULT_MAX_CONTEXT_LEN
 from worldtoken.config import (
     ActionHeadConfig,
     BuildConfig,
-    DynamicsConfig,
     EncoderConfig,
     ModelConfig,
     SequenceModelConfig,
@@ -74,7 +66,6 @@ from worldtoken.data import (
     select_or_load_holdout_refs,
     select_or_load_train_eval_refs,
 )
-from worldtoken.peft_utils import add_lora_cli_args, maybe_wrap_lora
 from worldtoken.train_utils import (
     _barrier,
     _eval_metrics_to_float,
@@ -96,60 +87,6 @@ from worldtoken.train_utils import (
     set_seed,
     write_json,
 )
-
-
-_IMAGE_WEIGHT_KEY_ALIASES = {
-    "left": ROBOCASA_IMAGE_KEYS[0],
-    "agentview_left": ROBOCASA_IMAGE_KEYS[0],
-    "right": ROBOCASA_IMAGE_KEYS[1],
-    "agentview_right": ROBOCASA_IMAGE_KEYS[1],
-    "in_hand": ROBOCASA_IMAGE_KEYS[2],
-    "inhand": ROBOCASA_IMAGE_KEYS[2],
-    "eye_in_hand": ROBOCASA_IMAGE_KEYS[2],
-}
-
-
-def _parse_image_key_weights(value: Any) -> dict[str, float]:
-    if value is None or value == "":
-        return {}
-    if isinstance(value, dict):
-        items = value.items()
-    elif isinstance(value, (list, tuple)):
-        parsed: dict[str, float] = {}
-        for item in value:
-            parsed.update(_parse_image_key_weights(item))
-        return parsed
-    else:
-        text = str(value).strip()
-        if not text:
-            return {}
-        if text.startswith("{"):
-            try:
-                loaded = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise argparse.ArgumentTypeError(f"invalid JSON image weight map: {exc}") from exc
-            return _parse_image_key_weights(loaded)
-        items = []
-        for part in text.replace(";", ",").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "=" not in part:
-                raise argparse.ArgumentTypeError(
-                    "image weights must use key=value pairs, e.g. left=0.5,right=0.5,in_hand=2"
-                )
-            key, weight = part.split("=", 1)
-            items.append((key.strip(), weight.strip()))
-
-    parsed = {}
-    for raw_key, raw_weight in items:
-        key = _IMAGE_WEIGHT_KEY_ALIASES.get(str(raw_key).strip(), str(raw_key).strip())
-        try:
-            weight = float(raw_weight)
-        except (TypeError, ValueError) as exc:
-            raise argparse.ArgumentTypeError(f"invalid image weight for {raw_key!r}: {raw_weight!r}") from exc
-        parsed[key] = weight
-    return parsed
 
 
 def _parse_holdout_rmse_samplers(value: Any) -> tuple[str, ...]:
@@ -327,9 +264,9 @@ def _build_resume_constant_scheduler(
 _NO_DECAY_EMBED_HINTS = ("modal_emb", "cam_id_emb", "readout_q")
 _GROUP_B_LR_PREFIXES = ("encoder.", "predictor.")
 _TRIGROUP_LR_PREFIXES = {
-    "encoder": ("encoder.", "z_bottleneck."),
+    "encoder": ("encoder.",),
     "predictor": ("predictor.",),
-    "action_head": ("action_head.", "dynamics."),
+    "action_head": ("action_head.",),
 }
 
 
@@ -406,13 +343,12 @@ def build_param_groups(
 
     ``backbone_lr`` optionally enables the legacy scaling-plan dual-LR recipe. The field
     name is retained for config compatibility, but it is the group-B LR:
-    ``encoder.*`` plus ``predictor.*`` use ``backbone_lr`` while action/dynamics
+    ``encoder.*`` plus ``predictor.*`` use ``backbone_lr`` while action-head
     modules use ``base_lr``. If ``backbone_lr`` is omitted, the legacy single-LR
     grouping is preserved exactly.
 
     ``encoder_lr`` / ``predictor_lr`` / ``action_head_lr`` enable the newer
-    three-group scaling recipe. ``z_bottleneck.*`` uses the encoder LR, and
-    ``action_head.*`` / ``dynamics.*`` / unmatched trainable params use the
+    three-group scaling recipe. ``action_head.*`` / unmatched trainable params use the
     action-head LR. They are mutually exclusive with ``backbone_lr``.
     """
     tri_values = {
@@ -562,7 +498,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone-type",
         default=defaults.get("backbone_type", "qwen2"),
-        help="HF decoder family for the continuous-token sequence backbone (qwen2, llama, mistral).",
+        help="Qwen2 continuous-token sequence backbone.",
     )
     parser.add_argument(
         "--attn-impl",
@@ -574,9 +510,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cnn-depth", type=int, default=int(defaults.get("cnn_depth", 48)))
     parser.add_argument("--cnn-mults", type=_parse_mults, default=_parse_mults(defaults.get("cnn_mults", "2,3,4,4")))
     parser.add_argument("--cnn-kernel", type=int, default=int(defaults.get("cnn_kernel", 5)))
-    parser.add_argument("--image-emb-dim", type=int, default=int(defaults.get("image_emb_dim", DEFAULT_ROBOCASA_IMAGE_EMB_DIM)))
-    parser.add_argument("--proprio-emb-dim", type=int, default=int(defaults.get("proprio_emb_dim", DEFAULT_ROBOCASA_PROPRIO_EMB_DIM)))
-    parser.add_argument("--lang-obs-emb-dim", type=int, default=int(defaults.get("lang_obs_emb_dim", DEFAULT_ROBOCASA_LANG_OBS_EMB_DIM)))
     parser.add_argument(
         "--use-proprio",
         action=argparse.BooleanOptionalAction,
@@ -585,79 +518,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-proprio", dest="use_proprio", action="store_false", help=argparse.SUPPRESS)
 
-    parser.add_argument("--action-decoder-emb", type=int, default=int(defaults.get("action_decoder_emb", DEFAULT_ROBOCASA_ACTION_DECODER_EMB)))
-    parser.add_argument(
-        "--dynamics-decoder-type",
-        choices=("film", "transition", "patch_dit"),
-        default=defaults.get("dynamics_decoder_type", "film"),
-        help=(
-            "Next-observation dynamics decoder. film is the legacy FiLM decoder; "
-            "transition uses an order-aware action-prefix encoder plus latent transition; "
-            "patch_dit uses patch-space diffusion for image dynamics."
-        ),
-    )
     parser.add_argument(
         "--action-chunk-len",
         type=int,
         default=int(defaults.get("action_chunk_len", 10)),
         help="H: predict a chunk of H future actions a_t..a_{t+H-1} per timestep (default 10, aligns with BC-Transformer). 1 = single-action (legacy).",
     )
-    parser.add_argument(
-        "--pred-next-steps",
-        type=int,
-        default=int(defaults.get("pred_next_steps", 1)),
-        help="n: supervise next-obs over obs[t+1..t+n] from the action prefix (default 1 == legacy single next-obs). Must be <= action_chunk_len.",
-    )
-    parser.add_argument(
-        "--pred-next-mode",
-        choices=("all_prefixes", "terminal"),
-        default=defaults.get("pred_next_mode", "all_prefixes"),
-        help=(
-            "How to reduce multi-step next-obs supervision when --pred-next-steps > 1. "
-            "all_prefixes supervises every k=1..n target; terminal supervises only "
-            "obs[t+n] from the full action prefix a[t:t+n]."
-        ),
-    )
-    parser.add_argument(
-        "--pred-next-obs-offset",
-        type=_opt_int,
-        default=_opt_int(defaults.get("pred_next_obs_offset")),
-        help=(
-            "Terminal pred target offset in observation-token units. Default None "
-            "preserves legacy behaviour (target offset == pred_next_steps). For "
-            "strided 5 Hz obs use --pred-next-obs-offset 1 with --pred-next-steps 4."
-        ),
-    )
-    parser.add_argument(
-        "--pred-next",
-        dest="enable_pred_next",
-        action=argparse.BooleanOptionalAction,
-        default=bool(defaults.get("enable_pred_next", defaults.get("include_pred_loss", True))),
-        help="Build and train the action-conditioned next-observation prediction heads. Use --no-pred-next to remove those heads and losses.",
-    )
-    parser.add_argument("--disable-pred-next", dest="enable_pred_next", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument("--eval-seed", type=int, default=int(defaults.get("eval_seed", defaults.get("fm_eval_seed", 0))))
     parser.add_argument("--fm-eval-seed", dest="eval_seed", type=int, help=argparse.SUPPRESS)
 
-    parser.add_argument("--pred-next-image-weight", type=float, default=float(defaults.get("pred_next_image_weight", 1.0)))
-    parser.add_argument(
-        "--pred-next-image-key-weights",
-        type=_parse_image_key_weights,
-        default=_parse_image_key_weights(defaults.get("pred_next_image_key_weights", defaults.get("pred_next_image_weights"))),
-        help=(
-            "Optional comma-separated pred-next image loss weights by camera key or alias "
-            "(left/right/in_hand), e.g. left=0.5,right=0.5,in_hand=2."
-        ),
-    )
-    parser.add_argument(
-        "--pred-next-image-weights",
-        dest="pred_next_image_key_weights",
-        type=_parse_image_key_weights,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument("--pred-next-proprio-weight", type=float, default=float(defaults.get("pred_next_proprio_weight", 1.0)))
-    parser.add_argument("--pred-next-lang-weight", type=float, default=float(defaults.get("pred_next_lang_weight", 0.1)))
-    parser.add_argument("--pred-warmup-steps", type=int, default=int(defaults.get("pred_warmup_steps", 0)))
 
     parser.add_argument("--seq-len", type=int, default=int(defaults.get("seq_len", 10)))
     parser.add_argument(
@@ -681,7 +550,7 @@ def parse_args() -> argparse.Namespace:
         default=(None if defaults.get("backbone_lr") is None else float(defaults["backbone_lr"])),
         help=(
             "Optional group-B LR for encoder.* and predictor.* params. "
-            "When set, --lr remains the base LR for action/dynamics params; the same "
+            "When set, --lr remains the base LR for action-head params; the same "
             "warmup+cosine multiplier is applied to every LR group."
         ),
     )
@@ -689,7 +558,7 @@ def parse_args() -> argparse.Namespace:
         "--encoder-lr",
         type=float,
         default=(None if defaults.get("encoder_lr") is None else float(defaults["encoder_lr"])),
-        help="Optional three-group LR for encoder.* and z_bottleneck.* params. Must be used with --predictor-lr and --action-head-lr.",
+        help="Optional three-group LR for encoder.* params. Must be used with --predictor-lr and --action-head-lr.",
     )
     parser.add_argument(
         "--predictor-lr",
@@ -701,7 +570,7 @@ def parse_args() -> argparse.Namespace:
         "--action-head-lr",
         type=float,
         default=(None if defaults.get("action_head_lr") is None else float(defaults["action_head_lr"])),
-        help="Optional three-group LR for action_head.* / dynamics.* / other params.",
+        help="Optional three-group LR for action_head.* / other params.",
     )
     parser.add_argument("--min-lr-ratio", type=float, default=float(defaults.get("min_lr_ratio", 0.1)))
     parser.add_argument("--weight-decay", type=float, default=float(defaults.get("weight_decay", 0.1)))
@@ -779,7 +648,7 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=bool(defaults.get("eval_at_start", False)),
         help="Run one full eval at step 0 before training. Default off so training starts immediately "
-             "(the step-0 eval would otherwise read both splits + per-task + trace before any training step).",
+             "(the step-0 eval would otherwise read both splits + per-task metrics before any training step).",
     )
     parser.add_argument("--seed", type=int, default=int(defaults.get("seed", 0)))
     parser.add_argument("--log-every", type=int, default=int(defaults.get("log_every", 25)))
@@ -838,13 +707,6 @@ def parse_args() -> argparse.Namespace:
     # --- diffusion action head (DPPO-compatible) ---------------------------------
     parser.add_argument("--denoising-steps", type=int, default=int(defaults.get("denoising_steps", 20)),
                         help="K: number of DDPM denoising steps for the diffusion action head.")
-    parser.add_argument("--diffusion-time-dim", type=int, default=int(defaults.get("diffusion_time_dim", 16)))
-    parser.add_argument("--diffusion-mlp-dims", type=_parse_mults,
-                        default=_parse_mults(defaults.get("diffusion_mlp_dims", "1024,1024,1024")),
-                        help="Hidden widths of the DPPO DiffusionMLP denoiser (comma-separated). "
-                             "With --diffusion-residual-style (default), the count must be ODD.")
-    parser.add_argument("--diffusion-residual-style", action=argparse.BooleanOptionalAction,
-                        default=bool(defaults.get("diffusion_residual_style", True)))
     parser.add_argument("--action-weight", type=float, default=float(defaults.get("action_weight", 1.0)),
                         help="Overall weight on the diffusion BC action loss.")
     parser.add_argument(
@@ -897,10 +759,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--holdout-per-task-metrics", action=argparse.BooleanOptionalAction,
                         default=bool(defaults.get("holdout_per_task_metrics", True)),
                         help="Also log holdout metrics separately for each RoboCasa task.")
-    parser.add_argument("--save-holdout-traces", action=argparse.BooleanOptionalAction,
-                        default=bool(defaults.get("save_holdout_traces", True)),
-                        help="Write a deterministic holdout prediction-image H5 trace on each holdout eval.")
-    add_lora_cli_args(parser, defaults)
     parser.add_argument("--eval-window-spec", type=Path, default=defaults.get("eval_window_spec"),
                         help="Portable fixed holdout windows for the paper experiments.")
     args = parser.parse_args()
@@ -939,64 +797,28 @@ def parse_args() -> argparse.Namespace:
 
 
 def _config_from_args(args: argparse.Namespace) -> BuildConfig:
-    """Map the CLI/yaml-default args into the structured model build config."""
-    cnn = dict(depth=int(args.cnn_depth), mults=tuple(args.cnn_mults), kernel_size=int(args.cnn_kernel))
-    dynamics_params = (
-        {}
-        if str(args.dynamics_decoder_type) == "patch_dit"
-        else dict(action_emb=int(args.action_decoder_emb), **cnn)
-    )
+    """Construct the single-world-token architecture; paper runs use --config."""
     return BuildConfig(
         model=ModelConfig(latent_dim=LATENT_DIM, action_chunk_len=int(args.action_chunk_len)),
-        # Default encoder is attn_fusion (the maintained one). The pure-CLI path
-        # only wires the CNN stem args; attn_fusion's transformer/readout knobs use
-        # their class defaults here -- set them via a structured --config yaml for
-        # non-default widths (e.g. d_model=2048). The legacy shallow_cnn_late_fusion
-        # args (image/proprio/lang_obs_emb_dim, input_norm) are no longer used here.
         encoder=EncoderConfig(
-            type="attn_fusion",
-            params=dict(
-                use_proprio=bool(args.use_proprio),
-                cnn_depth=int(args.cnn_depth),
-                cnn_mults=tuple(args.cnn_mults),
-                cnn_kernel=int(args.cnn_kernel),
-            ),
+            type="attn_fusion_latent_token",
+            params=dict(use_proprio=bool(args.use_proprio), cnn_depth=int(args.cnn_depth),
+                        cnn_mults=tuple(args.cnn_mults), cnn_kernel=int(args.cnn_kernel)),
         ),
         sequence_model=SequenceModelConfig(
-            type="continuous_transformer",
-            backbone_type=str(args.backbone_type),
+            type="continuous_transformer", backbone_type=str(args.backbone_type),
             hidden_dim=int(args.d_model),
-            params=dict(
-                n_layers=int(args.n_layers),
-                n_heads=int(args.n_heads),
-                n_kv_heads=args.n_kv_heads,
-                ffn_hidden_size=int(args.ffn_hidden_size),
-                dropout=float(args.dropout),
-                max_context_len=int(args.max_context_len),
-                input_norm=False,
-                model_dtype=str(args.model_dtype),
-                attn_impl=str(args.attn_impl),
-            ),
+            params=dict(n_layers=int(args.n_layers), n_heads=int(args.n_heads),
+                        n_kv_heads=args.n_kv_heads, ffn_hidden_size=int(args.ffn_hidden_size),
+                        dropout=float(args.dropout), max_context_len=int(args.max_context_len),
+                        input_norm=False, model_dtype=str(args.model_dtype), attn_impl=str(args.attn_impl)),
         ),
-        action_head=ActionHeadConfig(
-            type="diffusion",
-            params=dict(
-                denoising_steps=int(args.denoising_steps),
-                time_dim=int(args.diffusion_time_dim),
-                mlp_dims=tuple(args.diffusion_mlp_dims),
-                residual_style=bool(args.diffusion_residual_style),
-            ),
-        ),
-        dynamics=DynamicsConfig(
-            enabled=bool(args.enable_pred_next),
-            type=str(args.dynamics_decoder_type),
-            params=dynamics_params,
-        ),
+        action_head=ActionHeadConfig(type="diffusion_dit", params=dict(denoising_steps=int(args.denoising_steps))),
         env="robocasa",
     )
 
 
-_STRUCTURED_KEYS = ("model", "encoder", "sequence_model", "action_head", "dynamics", "obs_spec", "action_spec")
+_STRUCTURED_KEYS = ("model", "encoder", "sequence_model", "action_head", "obs_spec", "action_spec")
 
 
 def _resolve_build_config(args: argparse.Namespace) -> BuildConfig:
@@ -1019,7 +841,6 @@ def _reconcile_args_with_config(args: argparse.Namespace, cfg: BuildConfig) -> N
     updates = {
         "action_chunk_len": int(cfg.model.action_chunk_len),
         "max_context_len": int(cfg.sequence_model.params.get("max_context_len", DEFAULT_MAX_CONTEXT_LEN)),
-        "enable_pred_next": bool(cfg.dynamics.enabled),
         "use_proprio": bool(cfg.encoder.params.get("use_proprio", args.use_proprio)),
     }
     for key, value in updates.items():
@@ -1034,7 +855,6 @@ def _reconcile_args_with_config(args: argparse.Namespace, cfg: BuildConfig) -> N
 
 def _build_model(build_cfg: BuildConfig, args: argparse.Namespace, device: torch.device) -> tuple[RoboCasaDiffusionActionModel, dict]:
     model, resolved_cfg = build_model(build_cfg, device=str(device))
-    maybe_wrap_lora(model, args)
     return model, resolved_cfg
 
 
@@ -1045,14 +865,6 @@ def _objective_args(args: argparse.Namespace, *, update_norm: bool, compute_metr
     del update_norm, generator
     return {
         "action_weight": args.action_weight,
-        "pred_next_image_weight": args.pred_next_image_weight,
-        "pred_next_image_key_weights": args.pred_next_image_key_weights,
-        "pred_next_proprio_weight": args.pred_next_proprio_weight,
-        "pred_next_lang_weight": args.pred_next_lang_weight,
-        "pred_next_steps": args.pred_next_steps,
-        "pred_next_mode": args.pred_next_mode,
-        "pred_next_obs_offset": args.pred_next_obs_offset,
-        "include_pred_loss": bool(args.enable_pred_next),
         "compute_metrics": compute_metrics,
     }
 
@@ -1213,8 +1025,6 @@ def main() -> int:
     # dataset/validation below cannot diverge from the model that gets built.
     build_cfg = _resolve_build_config(args)
     _reconcile_args_with_config(args, build_cfg)
-    if not bool(args.use_proprio):
-        args.pred_next_proprio_weight = 0.0
     if args.seq_len < 1 or args.seq_len > args.max_context_len:
         raise ValueError(f"seq_len must be in [1, max_context_len], got {args.seq_len}")
     if args.dry_run_batch_size < 1:
@@ -1228,16 +1038,6 @@ def main() -> int:
             "holdout_sample_prefix_horizon must be <= action_chunk_len, "
             f"got {args.holdout_sample_prefix_horizon} > {args.action_chunk_len}"
         )
-    if bool(args.enable_pred_next):
-        if args.pred_next_steps < 1 or args.pred_next_steps > args.action_chunk_len:
-            raise ValueError(f"pred_next_steps must be in [1, action_chunk_len={args.action_chunk_len}], got {args.pred_next_steps}")
-        pred_target_offset = int(args.pred_next_obs_offset) if args.pred_next_obs_offset is not None else int(args.pred_next_steps)
-        if pred_target_offset < 1:
-            raise ValueError(f"pred_next_obs_offset must be >= 1 when set, got {args.pred_next_obs_offset}")
-        if pred_target_offset >= args.seq_len:
-            raise ValueError(
-                f"pred target obs offset must be < seq_len={args.seq_len} so the target obs exists, got {pred_target_offset}"
-            )
     if args.norm_fit_batches < 0:
         raise ValueError(f"norm_fit_batches must be >= 0, got {args.norm_fit_batches}")
     if args.prepare_lang_cache_only:
@@ -1773,32 +1573,6 @@ def main() -> int:
         if metrics_by_task:
             row["metrics_by_task"] = metrics_by_task
             row["task_demo_counts"] = holdout_task_counts
-        if bool(args.save_holdout_traces) and bool(args.enable_pred_next):
-            trace_t0 = time.time()
-            # The trace only renders sample 0; read a single CPU window in-process
-            # (write_robocasa_holdout_prediction_trace moves it to device itself).
-            trace_batch = next(iter(DataLoader(
-                holdout_dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=RoboCasaCollator()
-            )))
-            trace_path = write_robocasa_holdout_prediction_trace(
-                model=eval_model,
-                batch=trace_batch,
-                output_dir=output_dir,
-                global_step=step,
-                epoch=epoch,
-                device=device,
-                precision=args.precision,
-                pred_loss_active=step >= int(args.pred_warmup_steps),
-                denoising_steps=int(args.denoising_steps),
-                sample_deterministic=True,
-                eval_seed=int(args.eval_seed),
-                pred_next_steps=int(args.pred_next_steps),
-                pred_next_mode=str(args.pred_next_mode),
-                pred_next_obs_offset=args.pred_next_obs_offset,
-                obs_stride=int(args.obs_stride),
-            )
-            row["trace_h5"] = str(trace_path)
-            row["eval_seconds_trace"] = time.time() - trace_t0
         row["eval_seconds"] = time.time() - t0
         row["eval_seconds_holdout"] = holdout_seconds
         if train_eval_seconds is not None:
@@ -1823,7 +1597,6 @@ def main() -> int:
         optimizer.zero_grad(set_to_none=True)
         micro_metrics: list[dict[str, float]] = []
         step_loss_tokens = 0
-        include_pred_loss = bool(args.enable_pred_next) and global_step >= int(args.pred_warmup_steps)
         next_step = global_step + 1
         collect = next_step % args.log_every == 0 or next_step == 1
         for micro_idx in range(args.grad_accum_steps):
@@ -1847,7 +1620,6 @@ def main() -> int:
                         batch=batch,
                         **{
                             **_objective_args(args, update_norm=True, compute_metrics=collect, generator=None),
-                            "include_pred_loss": include_pred_loss,
                         },
                     )
                 if not torch.isfinite(loss):

@@ -84,7 +84,7 @@ def test_dataset_to_training_step(make_synthetic_hdf5, tiny_cfg) -> None:
     model.action_normalizer.fit(ac[cv])
 
     total, _ = robocasa_diffusion_action_objective(
-        model=model, batch=batch, include_pred_loss=True, pred_next_steps=1, compute_metrics=True
+        model=model, batch=batch,   compute_metrics=True
     )
     assert torch.isfinite(total)
     total.backward()
@@ -126,8 +126,6 @@ def test_seq_len_one_current_observation_only_training_step(make_synthetic_hdf5,
         low_dim_dims=tuple(ROBOCASA_LOW_DIM_DIMS),
         lang_dim=768,
         action_chunk_len=10,
-
-        pred_next=False,
     )
     model, _ = build_model(cfg, device="cpu")
     ac = batch["actions_chunk"].float()
@@ -137,7 +135,6 @@ def test_seq_len_one_current_observation_only_training_step(make_synthetic_hdf5,
     total, metrics = robocasa_diffusion_action_objective(
         model=model,
         batch=batch,
-        include_pred_loss=False,
         compute_metrics=True,
     )
     assert torch.isfinite(total)

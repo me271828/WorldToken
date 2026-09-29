@@ -1,4 +1,4 @@
-"""CPU tests for model forward, sampling, action loss and optional dynamics.
+"""CPU tests for model forward, sampling, action loss and holdout metrics.
 
 Includes backward checks for unused parameters and holdout metric aggregation.
 """
@@ -40,7 +40,7 @@ def test_forward_and_sample_shapes(tiny_cfg) -> None:
 
 
 def test_sample_rmse_records_rollout_prefix(tiny_cfg) -> None:
-    model, _ = build_model(tiny_cfg(action_chunk_len=6, pred_next=False), device="cpu")
+    model, _ = build_model(tiny_cfg(action_chunk_len=6), device="cpu")
     model.action_normalizer.fit(torch.randn(256, model.action_dim))
     batch = _batch(model, B=1, T=3)
     # The final row has a valid 4-action rollout prefix but not a valid full chunk.
@@ -49,7 +49,6 @@ def test_sample_rmse_records_rollout_prefix(tiny_cfg) -> None:
     total, metrics = robocasa_diffusion_action_objective(
         model=model,
         batch=batch,
-        include_pred_loss=False,
         compute_metrics=True,
         sample_rmse=True,
         sample_modes=("deterministic", "stochastic"),
@@ -103,9 +102,7 @@ def test_per_sample_rmse_rows_pool_back_to_batch_metrics(tiny_cfg) -> None:
     # Demo-clustered stderr relies on the objective's per-element rows being
     # sufficient statistics of the SAME sampling pass as the batch metrics:
     # summed per-element SSE/count must reproduce the batch statistics exactly.
-    # The legacy DPPO head has no per-sample loss support, so the rows carry
-    # ONLY the sampled-RMSE keys here (graceful degradation, not an error).
-    model, _ = build_model(tiny_cfg(action_chunk_len=6, pred_next=False), device="cpu")
+    model, _ = build_model(tiny_cfg(action_chunk_len=6), device="cpu")
     model.action_normalizer.fit(torch.randn(256, model.action_dim))
     batch = _batch(model, B=3, T=3)
     batch["action_chunk_valid"][1, -1, 4:] = False  # element 1: partial final chunk
@@ -115,7 +112,6 @@ def test_per_sample_rmse_rows_pool_back_to_batch_metrics(tiny_cfg) -> None:
     total, metrics = robocasa_diffusion_action_objective(
         model=model,
         batch=batch,
-        include_pred_loss=False,
         compute_metrics=True,
         sample_rmse=True,
         sample_modes=("deterministic", "stochastic"),
@@ -126,7 +122,7 @@ def test_per_sample_rmse_rows_pool_back_to_batch_metrics(tiny_cfg) -> None:
 
     assert torch.isfinite(total)
     assert len(rows) == 3 and all(rows)
-    assert all("action_ddpm_loss" not in row for row in rows)
+    assert all("action_ddpm_loss" in row for row in rows)
     _assert_rmse_rows_pool_back(rows, metrics)
 
 
@@ -136,7 +132,7 @@ def test_per_sample_rows_pool_back_to_batch_metrics_dit(tiny_cfg) -> None:
     import pytest
 
     pytest.importorskip("diffusers")
-    cfg = tiny_cfg(action_chunk_len=6, pred_next=False)
+    cfg = tiny_cfg(action_chunk_len=6)
     cfg["action_head"] = {
         "type": "diffusion_dit",
         "params": {"denoising_steps": 2, "d_model": 32, "n_layers": 1, "n_heads": 4, "dim_feedforward": 64},
@@ -151,7 +147,6 @@ def test_per_sample_rows_pool_back_to_batch_metrics_dit(tiny_cfg) -> None:
     total, metrics = robocasa_diffusion_action_objective(
         model=model,
         batch=batch,
-        include_pred_loss=False,
         compute_metrics=True,
         sample_rmse=True,
         sample_modes=("deterministic", "stochastic"),
@@ -178,47 +173,10 @@ def test_objective_runs_and_backprops_no_unused(tiny_cfg) -> None:
     model.action_normalizer.fit(torch.randn(256, model.action_dim))
     b = _batch(model)
     total, metrics = robocasa_diffusion_action_objective(
-        model=model, batch=b, include_pred_loss=True, pred_next_steps=1, compute_metrics=True
+        model=model, batch=b,   compute_metrics=True
     )
     assert torch.isfinite(total)
     assert "action_ddpm_loss" in metrics
     total.backward()
     unused = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
     assert not unused, f"unused params (break DDP find_unused_parameters=False): {unused[:8]}"
-
-
-def test_z_bottleneck_objective_backprops_no_unused(tiny_cfg) -> None:
-    cfg = tiny_cfg()
-    cfg["z_bottleneck"] = {"dim": 32}
-    model, _ = build_model(cfg, device="cpu")
-    model.action_normalizer.fit(torch.randn(256, model.action_dim))
-    b = _batch(model)
-    total, _ = robocasa_diffusion_action_objective(
-        model=model, batch=b, include_pred_loss=True, pred_next_steps=1, compute_metrics=True
-    )
-    assert torch.isfinite(total)
-    total.backward()
-    unused = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
-    assert not unused, f"unused params (break DDP find_unused_parameters=False): {unused[:8]}"
-
-
-def test_pred_next_image_key_weights_affect_aggregate(tiny_cfg) -> None:
-    model, _ = build_model(tiny_cfg(), device="cpu")
-    model.action_normalizer.fit(torch.randn(256, model.action_dim))
-    b = _batch(model)
-    zero_image_weights = {key: 0.0 for key in model.image_keys}
-    total, metrics = robocasa_diffusion_action_objective(
-        model=model,
-        batch=b,
-        action_weight=0.0,
-        include_pred_loss=True,
-        pred_next_steps=1,
-        pred_next_image_key_weights=zero_image_weights,
-        pred_next_proprio_weight=0.0,
-        pred_next_lang_weight=0.0,
-        compute_metrics=True,
-    )
-    assert torch.isfinite(total)
-    assert torch.allclose(total, torch.zeros_like(total))
-    assert torch.allclose(metrics["weighted_pred_next_image_loss"], torch.zeros_like(total))
-    assert "pred_next_image_unweighted_loss" in metrics

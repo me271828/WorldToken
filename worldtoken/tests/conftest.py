@@ -72,8 +72,6 @@ def tiny_build_cfg(
     action_dim: int = 12,
     discrete_dims: tuple[int, ...] = (6, 11),
     action_chunk_len: int = 4,
-    pred_next: bool = True,
-    dynamics_type: str = "film",
 ) -> dict:
     """A tiny, fast, env-agnostic build config dict for tests (inline specs)."""
     return {
@@ -89,7 +87,7 @@ def tiny_build_cfg(
         },
         "action_spec": {"dim": action_dim, "discrete_dims": list(discrete_dims)},
         "encoder": {
-            "type": "attn_fusion",
+            "type": "attn_fusion_latent_token",
             "params": {"d_model": 32, "n_heads": 4, "n_fusion_layers": 2, "mlp_ratio": 2,
                        "cnn_depth": 8, "cnn_mults": [2, 3], "cnn_kernel": 3},
         },
@@ -98,9 +96,7 @@ def tiny_build_cfg(
             "params": {"n_layers": 2, "n_heads": 4, "n_kv_heads": 2, "ffn_hidden_size": 128,
                        "max_context_len": 64, "input_norm": False, "attn_impl": "eager"},
         },
-        "action_head": {"type": "diffusion", "params": {"denoising_steps": 5, "mlp_dims": [64, 64, 64]}},
-        "dynamics": {"enabled": pred_next, "type": dynamics_type,
-                     "params": {"action_emb": 32, "depth": 8, "mults": [2, 3], "kernel_size": 3}},
+        "action_head": {"type": "diffusion_dit", "params": {"denoising_steps": 5, "d_model": 32, "n_layers": 1, "n_heads": 4, "dim_feedforward": 64}},
     }
 
 

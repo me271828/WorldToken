@@ -651,10 +651,6 @@ def _materialize_model_config(
         raise ValueError("RMBench observation dimensions diverged from the native data contract")
     if action_spec.dim != RMBENCH_ACTION_DIM or action_spec.discrete_dims:
         raise ValueError("RMBench action spec must be 14-D continuous absolute qpos")
-    if build_cfg.dynamics.enabled:
-        raise ValueError(
-            "the RMBench runner is action-only: set dynamics.enabled=false"
-        )
     if build_cfg.action_head.type != "diffusion_dit":
         raise ValueError("RMBench N2 requires action_head.type=diffusion_dit")
     if bool(build_cfg.action_head.params.get("use_obs_cross_attn", False)):
@@ -768,7 +764,7 @@ def build_rmbench_param_groups(
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name.startswith("encoder.") or name.startswith("z_bottleneck."):
+        if name.startswith("encoder."):
             role = "encoder"
         elif name.startswith("predictor."):
             role = "predictor"

@@ -49,12 +49,6 @@ class RMBenchRolloutPolicy:
         action_chunk_len = int(getattr(model, "action_chunk_len"))
         if int(execute_steps) < 1 or int(execute_steps) > action_chunk_len:
             raise ValueError(f"execute_steps must be in [1,{action_chunk_len}], got {execute_steps}")
-        action_head = getattr(model, "action_head", None)
-        if action_head is not None and bool(getattr(action_head, "needs_obs_tokens", False)):
-            raise ValueError(
-                "RMBench rollout forbids an action head that reads encoder "
-                "observation tokens outside the temporal bottleneck"
-            )
         self.model = model
         self.model.to(device)
         self.model.eval()

@@ -2,7 +2,7 @@
 
 Lifted verbatim from the old ``backbone.py`` (RMSNorm/InputAdapter/
 ContinuousOutputHead/count_parameters) and ``cnn.py`` (_group_count). Centralised
-here so encoder / transformer / dynamics can share them without cross-importing
+here so encoder / transformer / action head can share them without cross-importing
 each other.
 """
 

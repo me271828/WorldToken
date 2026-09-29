@@ -168,7 +168,7 @@ def test_frame_major_backbone_rejects_unsafe_readout_and_context_overflow() -> N
 
 
 def test_full_model_keeps_action_condition_shape(tiny_cfg) -> None:
-    cfg = tiny_cfg(latent_dim=32, d_model=32, pred_next=False)
+    cfg = tiny_cfg(latent_dim=32, d_model=32)
     cfg["encoder"] = {
         "type": "attn_fusion_raw_token",
         "expected_tokens_per_frame": 50,
@@ -200,7 +200,7 @@ def test_full_model_keeps_action_condition_shape(tiny_cfg) -> None:
 
 
 def test_builder_rejects_raw_encoder_with_single_token_backbone(tiny_cfg) -> None:
-    cfg = tiny_cfg(latent_dim=32, d_model=32, pred_next=False)
+    cfg = tiny_cfg(latent_dim=32, d_model=32)
     cfg["encoder"] = {
         "type": "attn_fusion_raw_token",
         "expected_tokens_per_frame": 50,

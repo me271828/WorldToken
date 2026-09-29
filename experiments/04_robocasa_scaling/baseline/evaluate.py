@@ -65,7 +65,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-scale", type=float, default=1.0)
     parser.add_argument("--save-videos-per-task", type=int, default=1)
     parser.add_argument("--save-failure-videos", type=int, default=0)
-    parser.add_argument("--save-rollout-traces", type=int, default=0)
     parser.add_argument("--video-skip", type=int, default=5)
     parser.add_argument(
         "--terminate-on-success",
@@ -106,14 +105,12 @@ class RobomimicPolicyAdapter:
         diffusion_deterministic: bool,
         execute_horizon: int,
         obs_stride: int,
-        trace_action_prefix_len: int,
-        trace_target_offset: int,
         zero_lang_emb: bool,
         zero_proprio: bool,
         zero_image_keys: tuple[str, ...],
         **_: Any,
     ) -> None:
-        del diffusion_deterministic, trace_action_prefix_len, trace_target_offset
+        del diffusion_deterministic
         if action_mean_samples != 1:
             raise ValueError("official RoboMimic baselines require action_mean_samples=1")
         if obs_stride != 1:
@@ -158,8 +155,6 @@ class RobomimicPolicyAdapter:
         self.rollout_policy.lang_encoder = None
         self.lang_emb: np.ndarray | None = None
         self.history: list[dict[str, np.ndarray]] = []
-        self.last_capture = None
-        self.capture_trace = False
         self.action_dim = int(self.rollout_policy.policy.ac_dim)
         if self.action_dim != ROBOCASA_ACTION_DIM:
             raise ValueError(
@@ -169,11 +164,6 @@ class RobomimicPolicyAdapter:
         self.discrete_names = tuple(str(name) for name in ROBOCASA_DISCRETE_ACTION_NAMES)
         self.reset_action_stats()
 
-    def set_capture(self, enabled: bool) -> None:
-        if enabled:
-            raise ValueError("RoboMimic baseline rollout traces are not implemented")
-        self.capture_trace = False
-        self.last_capture = None
 
     def reset_action_stats(self) -> None:
         self.action_abs_max = 0.0
@@ -381,8 +371,6 @@ def main() -> int:
         raise ValueError("--dataset-from-config is required for the formal MG23 protocol")
     if not args.robocasa_bc_eval_protocol:
         raise ValueError("--robocasa-bc-eval-protocol is required")
-    if args.save_rollout_traces != 0:
-        raise ValueError("official baseline rollout traces are not implemented")
 
     common.setup_external_paths(args.robomimic_src, args.robocasa_src)
     common.init_robomimic_obs_utils()
@@ -538,7 +526,6 @@ def main() -> int:
         "action_bound_margin": float(args.action_bound_margin),
         "save_videos_per_task": int(args.save_videos_per_task),
         "save_failure_videos": int(args.save_failure_videos),
-        "save_rollout_traces": int(args.save_rollout_traces),
         "terminate_on_success": bool(args.terminate_on_success),
         "episode_seed_scheme": common.EPISODE_SEED_SCHEME,
         "episode_seed_manifest": {
@@ -589,14 +576,11 @@ def main() -> int:
         action_sampling=protocol["sampling"],
         execute_horizon=int(protocol["execute_horizon"]),
         obs_stride=1,
-        trace_action_prefix_len=1,
-        trace_target_offset=1,
         seed=args.seed,
         video_skip=args.video_skip,
         render_smoke_video=(args.mode == "smoke"),
         save_failure_videos=args.save_failure_videos,
         save_videos_per_task=args.save_videos_per_task,
-        save_rollout_traces=args.save_rollout_traces,
         terminate_on_success=args.terminate_on_success,
         env_backend=args.env_backend,
         action_clip=args.action_clip,

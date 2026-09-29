@@ -18,11 +18,6 @@ class ObservationEncoder(nn.Module, ABC):
 
     image_keys: tuple[str, ...]
     latent_dim: int
-    # Spatial-token encoders set this True and accept ``encode(..., return_obs_tokens=True)``
-    # to also return obs tokens ``[B, T, N, d_model]`` for an action head's
-    # cross-attention. Default False: pooled-vector-only encoders.
-    provides_obs_tokens: bool = False
-
     @abstractmethod
     def encode(
         self,

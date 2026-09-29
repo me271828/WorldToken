@@ -33,31 +33,30 @@ padding is added.
 
 ## Training
 
-The paths and full recipe are in
-`worldtoken/configs/rmbench_9task.yaml`. Set `RMBENCH_DATA_ROOT` to the directory
-containing the task folders, or pass `--dataset-root`. The default output directory
-is `runs/rmbench_9task_n2_patch20_seq288`; override it with `--output-dir`.
-Inspect the resolved contract without opening data:
+The two recorded recipes and continuation instructions are in
+[Section 7](../experiments/07_long_history_rmbench/README.md). Set `DATA_ROOT`
+to the expert-demonstration root and `RUNS_ROOT` to the training output root.
+Prepare the initialization command without opening data:
 
 ```bash
-python -m worldtoken.train_rmbench \
-  --config worldtoken/configs/rmbench_9task.yaml \
-  --print-config
+INIT_CONFIG=experiments/07_long_history_rmbench/configs/e4_rmbench_9task_n2_patch20_seq288_seed1_5k_cuda4.json
+python -m experiments.common.train --config "$INIT_CONFIG" \
+  --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" --prepare-only
 ```
 
-Run a real data/model forward-backward check:
+Run a small data/model forward-backward check when the environment and data are available:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m worldtoken.train_rmbench \
-  --config worldtoken/configs/rmbench_9task.yaml \
+  --config "$INIT_CONFIG" --dataset-root "$DATA_ROOT/rmbench" \
   --dry-run-data
 ```
 
 Start training:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m worldtoken.train_rmbench \
-  --config worldtoken/configs/rmbench_9task.yaml
+CUDA_VISIBLE_DEVICES=0 python -m experiments.common.train --config "$INIT_CONFIG" \
+  --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT"
 ```
 
 The confirmed N2 optimizer recipe is three AdamW groups:

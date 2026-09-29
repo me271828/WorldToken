@@ -20,31 +20,20 @@ dependencies = [
 Repository = "https://github.com/me271828/WorldToken"
 
 [project.optional-dependencies]
-train = ["peft", "einops", "tqdm", "opencv-python-headless>=4.8,<5"]
+train = ["tqdm", "opencv-python-headless>=4.8,<5"]
 rollout = ["imageio", "imageio-ffmpeg"]
 robocasa = ["robomimic", "robosuite", "robocasa"]
 dev = ["pytest", "ruff"]
 analysis = ["matplotlib", "scipy"]
 
 [tool.setuptools]
-# The DPPO model subset under worldtoken/third_party/dppo is imported by filesystem path
-# (see dppo_compat.py), not as a discovered package -- its top-level layout
-# (model) is not namespaced under worldtoken. So it is excluded from
-# package discovery but shipped as package data, so non-editable installs
-# (pip install . / wheel) still carry it. Source-tree / `pip install -e .` is the
-# primary supported workflow.
 include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["worldtoken*", "experiments*"]
-exclude = ["worldtoken.third_party*"]
 
 [tool.setuptools.package-data]
-worldtoken = ["third_party/**/*"]
 experiments = ["**/*.json", "**/*.json.gz", "**/*.patch", "**/*.md"]
-
-[tool.setuptools.exclude-package-data]
-worldtoken = ["third_party/**/*.pyc", "third_party/**/*.pyo", "third_party/**/__pycache__/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["worldtoken/tests"]
@@ -53,7 +42,6 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py310"
 line-length = 120
-extend-exclude = ["worldtoken/third_party"]
 
 [tool.ruff.lint]
 # Conservative baseline: real bugs (pyflakes + syntax), not style/import-order churn.

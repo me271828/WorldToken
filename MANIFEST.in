@@ -1,6 +1,4 @@
-# Ship the vendored DPPO tree (imported by filesystem path in dppo_compat.py) in
-# sdists. Wheels carry it via [tool.setuptools.package-data] in pyproject.toml.
-recursive-include worldtoken/third_party *
+# Include the fixed experiment inputs in source distributions.
 recursive-include experiments *.json *.json.gz *.patch *.md
 global-exclude *.py[cod]
 global-exclude __pycache__

@@ -1,7 +1,7 @@
-"""Behavior-cloning action loss and optional next-observation prediction loss.
+"""Behavior-cloning action loss and offline action-error metrics.
 
-Action loss uses positions whose full action chunk is valid. The dynamics
-decoder owns its auxiliary loss. Holdout metrics pool sums and counts.
+Training uses positions whose full action chunk is valid. Holdout metrics pool
+squared-error sums and counts across batches and tasks.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 import torch
 
 from worldtoken.envs.robocasa import ROBOCASA_ACTION_RMSE_GROUPS
-from worldtoken.losses import _unwrap
+from worldtoken.train_utils import _unwrap
 
 
 def robocasa_diffusion_action_objective(
@@ -21,14 +21,6 @@ def robocasa_diffusion_action_objective(
     model: torch.nn.Module,
     batch: dict[str, Any],
     action_weight: float = 1.0,
-    pred_next_image_weight: float = 1.0,
-    pred_next_image_key_weights: dict[str, float] | None = None,
-    pred_next_proprio_weight: float = 1.0,
-    pred_next_lang_weight: float = 0.1,
-    pred_next_steps: int = 1,
-    pred_next_mode: str = "all_prefixes",
-    pred_next_obs_offset: int | None = None,
-    include_pred_loss: bool = True,
     compute_metrics: bool = True,
     sample_rmse: bool = False,
     sample_modes: tuple[str, ...] | list[str] | None = None,
@@ -55,10 +47,6 @@ def robocasa_diffusion_action_objective(
     validity masks. No extra RNG draw or model call is introduced."""
     outputs = model(batch["images"], batch["proprio"], batch["lang_emb"], run_prediction=True)
     raw = _unwrap(model)
-    if pred_next_image_key_weights:
-        unknown = sorted(set(pred_next_image_key_weights) - set(raw.image_keys))
-        if unknown:
-            raise ValueError(f"unknown pred_next_image_key_weights keys {unknown}; available image keys: {list(raw.image_keys)}")
     h = outputs["h"]
     actions_chunk = batch["actions_chunk"]            # [B, T, H, A]
     valid_mask = batch["valid_mask"].bool()           # [B, T]
@@ -66,23 +54,7 @@ def robocasa_diffusion_action_objective(
 
     # Train only on positions whose full chunk is valid.
     sel = valid_mask & chunk_valid.all(dim=-1)        # [B, T]
-    needs_obs_tokens = bool(getattr(raw.action_head, "needs_obs_tokens", False))
-    needs_world_history = bool(getattr(raw.action_head, "needs_world_history", False))
-    world_tokens_all: torch.Tensor | None = None
-    world_token_mask_all: torch.Tensor | None = None
-    if needs_world_history:
-        world_tokens_all, world_token_mask_all = raw.past_world_context(outputs["z"])
 
-    def _action_conditioning_kwargs(selection: torch.Tensor) -> dict[str, torch.Tensor]:
-        if needs_obs_tokens:
-            return {"obs_tokens": outputs["obs_tokens"][selection]}
-        if needs_world_history:
-            assert world_tokens_all is not None and world_token_mask_all is not None
-            return {
-                "world_tokens": world_tokens_all[selection],
-                "world_token_mask": world_token_mask_all[selection],
-            }
-        return {}
 
     timestep_metrics: dict[str, torch.Tensor] = {}
     # Per-batch-element sufficient statistics ([B] tensors keyed like the batch
@@ -94,16 +66,13 @@ def robocasa_diffusion_action_objective(
     if bool(sel.any()):
         h_flat = h[sel]                               # [N, LATENT_DIM]
         act = actions_chunk.float()[sel]              # [N, H, A]
-        # Cross-attn heads take their KV memory selected by the SAME [B,T]
-        # training mask: encoder obs tokens or strictly-past world tokens.
-        conditioning_kwargs = _action_conditioning_kwargs(sel)
         use_timestep_metrics = (
             compute_metrics and ddpm_timestep_metrics and hasattr(raw.action_head, "bc_loss_with_timestep_metrics")
         )
         loss_fn = (
             raw.action_head.bc_loss_with_timestep_metrics if use_timestep_metrics else raw.action_head.bc_loss
         )
-        loss_kwargs: dict[str, Any] = dict(conditioning_kwargs)
+        loss_kwargs: dict[str, Any] = {}
         per_sample_losses: list[torch.Tensor] = []
         if element_values is not None and "per_sample_out" in inspect.signature(loss_fn).parameters:
             loss_kwargs["per_sample_out"] = per_sample_losses
@@ -133,37 +102,11 @@ def robocasa_diffusion_action_objective(
 
     total = sum(weighted.values())
 
-    # Next-observation prediction (predimg15 aux) -- reused verbatim.
-    pred_metrics: dict[str, torch.Tensor] = {}
-    if include_pred_loss:
-        if getattr(raw, "pred_decoder", None) is None:
-            raise RuntimeError("include_pred_loss=True but the model was built with enable_pred_next=False")
-        pred_losses, pred_metrics = raw.pred_decoder.bc_loss(
-            model=model,
-            h=h,
-            batch=batch,
-            pred_next_steps=int(pred_next_steps),
-            pred_next_mode=str(pred_next_mode),
-            pred_next_obs_offset=pred_next_obs_offset,
-            image_keys=raw.image_keys,
-            image_weights=pred_next_image_key_weights,
-            compute_metrics=compute_metrics,
-        )
-        weighted["weighted_pred_next_image_loss"] = float(pred_next_image_weight) * pred_losses["pred_next_image"]
-        weighted["weighted_pred_next_proprio_loss"] = float(pred_next_proprio_weight) * pred_losses["pred_next_proprio"]
-        weighted["weighted_pred_next_lang_loss"] = float(pred_next_lang_weight) * pred_losses["pred_next_lang"]
-        total = (
-            total
-            + weighted["weighted_pred_next_image_loss"]
-            + weighted["weighted_pred_next_proprio_loss"]
-            + weighted["weighted_pred_next_lang_loss"]
-        )
 
     metrics: dict[str, torch.Tensor] = {}
     if compute_metrics:
         metrics["action_ddpm_loss"] = action_loss.detach()
         metrics["action_valid_count"] = sel.float().sum().detach()
-        metrics.update(pred_metrics)
         metrics.update({k: v.detach() for k, v in weighted.items()})
         metrics["loss"] = total.detach()
         metrics.update(timestep_metrics)
@@ -206,7 +149,6 @@ def robocasa_diffusion_action_objective(
             # per-horizon and prefix/full masks without a second model forward.
             sample_sel = valid_mask & chunk_valid[..., 0]
             if bool(sample_sel.any()):
-                sample_conditioning_kwargs = _action_conditioning_kwargs(sample_sel)
                 target = actions_chunk.float()[sample_sel]
                 sample_chunk_valid = chunk_valid[sample_sel]
                 element_sample_idx = (
@@ -295,7 +237,6 @@ def robocasa_diffusion_action_objective(
                         deterministic=(mode == "deterministic"),
                         generator=_sampler_generator(),
                         num_samples=int(sample_action_mean_samples),
-                        **sample_conditioning_kwargs,
                     )  # [N, H, A]
                     sq = (sampled.float() - target).square()
                     if action_trace_batches_out is not None:

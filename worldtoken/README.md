@@ -9,14 +9,11 @@ used by those recipes.
 | Directory | Purpose |
 |---|---|
 | `encoder/` | Encode camera images, proprioception and language/task conditioning; includes the paper's K=1, K=4, K=50 and RMBench encoders. |
-| `transformer/` | Temporal causal decoder, frame-major multi-token handling and optional temporal-model variants. |
-| `action_head/` | Action normalization, diffusion training and sampling; the paper uses `dit.py`. |
-| `dynamics/` | Optional action-conditioned future-observation prediction and its decoder components. |
+| `transformer/` | Qwen2 temporal causal decoder and frame-major multi-token handling. |
+| `action_head/` | Action normalization, DiT diffusion training and sampling. |
 | `envs/` | RoboCasa observation/action definitions, environment creation and rollout diagnostics. |
-| `training/` | Holdout aggregation, per-task statistics and action/prediction trace output. |
-| `configs/` | General development examples; use `../experiments/*/configs/` for paper experiments. |
+| `training/` | Holdout aggregation, per-task statistics and offline action-error trace output. |
 | `tests/` | Regression tests for components, data alignment, checkpoint construction, metrics and rollout behavior. |
-| `third_party/dppo/` | Retained upstream BC diffusion-model dependencies for optional MLP/U-Net heads. |
 
 The top-level files group into these roles:
 
@@ -24,13 +21,11 @@ The top-level files group into these roles:
 |---|---|
 | `config.py`, `builder.py`, `model.py`, `specs.py` | Define settings, construct components and expose the common policy interface. |
 | `data.py`, `rmbench_data.py` | Read expert demonstrations and build aligned temporal observation/action samples. |
-| `objective.py`, `rmbench_objective.py`, `losses.py` | Behavior-cloning losses, offline metrics and optional dynamics losses. |
+| `objective.py`, `rmbench_objective.py` | Behavior-cloning action losses and offline metrics. |
 | `train_bc.py`, `train_rmbench.py`, `train_utils.py` | Training loops, optimizer/checkpoint utilities and distributed execution support. |
 | `eval_rollout.py`, `eval_holdout_rmse.py`, `rmbench_policy.py` | Simulation inference, offline evaluation and RMBench policy state. |
 | `launch_holdout_rmse_batch.py`, `validate_holdout_action_trace.py` | Batch offline evaluation and checks of saved action-error traces. |
-| `make_robocasa_holdout_grid_video.py`, `summarize_placement_rollouts.py` | Dynamics prediction videos and placement rollout summaries. |
-| `train_current_obs.py`, `train_dp_like.py` | Optional comparison training entry points outside the paper's four result recipes. |
-| `layers.py`, `constants.py`, `paths.py`, `peft_utils.py`, `dppo_compat.py` | Shared neural layers, defaults, environment-based paths and optional adapter/library integration. |
+| `layers.py`, `constants.py`, `paths.py` | Shared neural layers, defaults and environment-based paths. |
 | `RMBENCH.md` | Details of the RMBench data and model interfaces. |
 
 ## Observation encoder
@@ -58,17 +53,12 @@ frame-major order and reads the final token of each observation frame.
 
 The paper action head is `action_head/dit.py`: a conditional diffusion
 transformer with 20 cosine-schedule DDPM denoising steps. RoboCasa predicts ten
-actions; RMBench predicts eight. The paper recipes disable future-observation objectives.
-
-Optional next-observation prediction remains available in `dynamics/`: FiLM,
-action-transition, patch DiT and token-translator decoders. Their losses and
-prediction traces are supported by the RoboCasa trainer. They are independent
-of the action-only paper recipes.
+actions; RMBench predicts eight. All policies train with action-generation objectives.
 
 `config.py` loads the structured model settings; `builder.py` constructs their
 registered encoder, temporal model and action head. The model sections in each
-experiment recipe are authoritative. The generic dataclass and CLI defaults
-support other configurations and are not the paper training recipe.
+experiment recipe are authoritative. Use the 69 recipes under `experiments/`
+for the recorded training settings.
 
 ## Data and training
 

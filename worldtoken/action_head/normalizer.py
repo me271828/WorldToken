@@ -77,3 +77,17 @@ class MinMaxActionNormalizer(nn.Module):
         loc = self.loc.to(dtype=x.dtype)
         scale = self.scale.to(dtype=x.dtype)
         return x * scale + loc
+
+
+def threshold_discrete_dims(actions: torch.Tensor, discrete_dims: tuple[int, ...]) -> torch.Tensor:
+    """Sign-threshold the given action dims to {-1, +1}.
+
+    The diffusion head samples real values for every dim; the discrete control
+    switches (e.g. RoboCasa gripper / base-mode) must be hard {-1, +1}. Shared so
+    any sampler post-processes identically. Returns a new tensor; a no-op when
+    ``discrete_dims`` is empty."""
+    if not discrete_dims:
+        return actions
+    idx = torch.tensor(tuple(discrete_dims), device=actions.device, dtype=torch.long)
+    disc = torch.where(actions.index_select(-1, idx) > 0.0, 1.0, -1.0)
+    return actions.index_copy(-1, idx, disc)

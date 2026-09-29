@@ -41,13 +41,12 @@ def _role_param_ids(model, role: str) -> set[int]:
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if role == "encoder" and (name.startswith("encoder.") or name.startswith("z_bottleneck.")):
+        if role == "encoder" and name.startswith("encoder."):
             out.add(id(p))
         elif role == "predictor" and name.startswith("predictor."):
             out.add(id(p))
         elif role == "action_head" and not (
             name.startswith("encoder.")
-            or name.startswith("z_bottleneck.")
             or name.startswith("predictor.")
         ):
             out.add(id(p))

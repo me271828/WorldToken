@@ -10,9 +10,7 @@ Covers the env-agnostic guarantees added in the refactor:
 
 from __future__ import annotations
 
-import json
 
-import h5py
 import numpy as np
 import torch
 
@@ -20,9 +18,6 @@ from worldtoken.envs.robocasa import ROBOCASA_IMAGE_HW
 from worldtoken.envs.robocasa_rollout import clip_action_for_env, obs_images_to_uint8_hwc
 from worldtoken.eval_rollout import (
     RoboCasaRolloutPolicy,
-    RolloutTraceCollector,
-    TaskSpec,
-    write_rollout_prediction_trace,
 )
 
 # Small non-RoboCasa shapes to prove the policy is spec-driven.
@@ -36,9 +31,8 @@ IMAGE_KEYS = ("cam",)
 class _MockModel(torch.nn.Module):
     """Deterministic-given-generator stand-in for the trained action model."""
 
-    def __init__(self, pred_decoder=None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.pred_decoder = pred_decoder
         self.seen_time_lengths = []
 
     def forward(self, images, proprio, lang, run_prediction=True):
@@ -50,75 +44,6 @@ class _MockModel(torch.nn.Module):
         b = h_last.shape[0]
         chunk = torch.randn(b, CHUNK_LEN, ACTION_DIM, generator=generator)
         return chunk.unsqueeze(1)  # [B, 1, H, action_dim]
-
-    def _encode_action_for_decoder(self, action):
-        return action.float()
-
-
-class _HistoryMockModel(_MockModel):
-    """Records the world-history tensors threaded by rollout."""
-
-    class _ActionHead:
-        needs_world_history = True
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.action_head = self._ActionHead()
-        self.last_world_tokens = None
-        self.last_world_token_mask = None
-
-    def forward(self, images, proprio, lang, run_prediction=True):
-        del images, lang, run_prediction
-        b, t = proprio.shape[:2]
-        z = torch.arange(t, dtype=torch.float32).view(1, t, 1).expand(b, t, D_MODEL)
-        return {"z": z, "h": z}
-
-    def past_world_context(self, z):
-        b, t, d = z.shape
-        memory_len = max(1, t - 1)
-        mask = (
-            torch.arange(memory_len)[None, :] < torch.arange(t)[:, None]
-        ).unsqueeze(0).expand(b, -1, -1)
-        tokens = z[:, None, :memory_len].expand(b, t, memory_len, d) * mask.unsqueeze(-1)
-        return tokens, mask
-
-    def sample_action_chunk(
-        self,
-        h_last,
-        *,
-        deterministic=True,
-        generator=None,
-        num_samples=1,
-        world_tokens=None,
-        world_token_mask=None,
-    ):
-        del deterministic, num_samples
-        self.last_world_tokens = world_tokens
-        self.last_world_token_mask = world_token_mask
-        b = h_last.shape[0]
-        return torch.randn(b, 1, CHUNK_LEN, ACTION_DIM, generator=generator)
-
-
-class _PredictNextDecoder:
-    def __init__(self) -> None:
-        self.last_h_shape = None
-        self.last_base_shapes = None
-        self.last_action_shape = None
-
-    def predict_next(self, model, h_flat, base_images_flat, action_norm_prefix):
-        del model
-        self.last_h_shape = tuple(h_flat.shape)
-        self.last_base_shapes = {key: tuple(value.shape) for key, value in base_images_flat.items()}
-        self.last_action_shape = tuple(action_norm_prefix.shape)
-        n = int(h_flat.shape[0])
-        return {
-            "images": {
-                key: torch.full((n, 8, 8, 3), 0.5, dtype=torch.float32, device=h_flat.device)
-                for key in IMAGE_KEYS
-            },
-            "proprio": torch.zeros(n, 5, dtype=torch.float32, device=h_flat.device),
-            "lang_emb": torch.zeros(n, LANG_DIM, dtype=torch.float32, device=h_flat.device),
-        }
 
 
 class _ConstLangProvider:
@@ -255,132 +180,6 @@ def test_single_history_token_keeps_only_current_observation() -> None:
     _rollout(policy, seed=0, steps=4)
 
     assert model.seen_time_lengths == [1, 1, 1, 1]
-
-
-def test_rollout_threads_strictly_past_world_tokens_to_history_head() -> None:
-    model = _HistoryMockModel()
-    policy = RoboCasaRolloutPolicy(
-        model=model,
-        device=torch.device("cpu"),
-        seq_len=3,
-        lang_provider=_ConstLangProvider(),
-        execute_horizon=1,
-        image_keys=IMAGE_KEYS,
-        action_dim=ACTION_DIM,
-        discrete_dims=(ACTION_DIM - 1,),
-        discrete_names=("grip",),
-        lang_dim=LANG_DIM,
-    )
-
-    _rollout(policy, seed=0, steps=1)
-
-    assert tuple(model.last_world_tokens.shape) == (1, 1, 2, D_MODEL)
-    assert tuple(model.last_world_token_mask.shape) == (1, 1, 2)
-    assert torch.equal(
-        model.last_world_token_mask[0, 0],
-        torch.tensor([True, True]),
-    )
-
-
-def test_trace_capture_supports_predict_next_decoder() -> None:
-    pred_decoder = _PredictNextDecoder()
-    policy = RoboCasaRolloutPolicy(
-        model=_MockModel(pred_decoder=pred_decoder),
-        device=torch.device("cpu"),
-        seq_len=2,
-        lang_provider=_ConstLangProvider(),
-        image_keys=IMAGE_KEYS,
-        action_dim=ACTION_DIM,
-        discrete_dims=(ACTION_DIM - 1,),
-        discrete_names=("grip",),
-        lang_dim=LANG_DIM,
-    )
-    policy.set_capture(True)
-    policy.start_episode(lang="open the door", seed=0)
-
-    action = policy(_obs())
-
-    assert action.shape == (ACTION_DIM,)
-    assert pred_decoder.last_h_shape == (1, D_MODEL)
-    assert pred_decoder.last_base_shapes == {"cam": (1, 8, 8, 3)}
-    assert pred_decoder.last_action_shape == (1, 1, ACTION_DIM)
-    assert policy.last_capture is not None
-    assert policy.last_capture["predicted"]["cam"].shape == (8, 8, 3)
-
-
-def test_strided_trace_capture_uses_full_action_prefix_only_on_token_boundary() -> None:
-    pred_decoder = _PredictNextDecoder()
-    policy = RoboCasaRolloutPolicy(
-        model=_MockModel(pred_decoder=pred_decoder),
-        device=torch.device("cpu"),
-        seq_len=2,
-        lang_provider=_ConstLangProvider(),
-        execute_horizon=4,
-        obs_stride=4,
-        trace_action_prefix_len=4,
-        trace_target_offset=1,
-        image_keys=IMAGE_KEYS,
-        action_dim=ACTION_DIM,
-        discrete_dims=(ACTION_DIM - 1,),
-        discrete_names=("grip",),
-        lang_dim=LANG_DIM,
-    )
-    policy.set_capture(True)
-    policy.start_episode(lang="open the door", seed=0)
-
-    has_capture = []
-    for _ in range(5):
-        policy(_obs())
-        has_capture.append(policy.last_capture is not None)
-
-    assert has_capture == [True, False, False, False, True]
-    assert pred_decoder.last_action_shape == (1, 4, ACTION_DIM)
-    assert policy.last_capture is not None
-    assert policy.last_capture["target_offset"] == 1
-    assert policy.last_capture["obs_stride"] == 4
-    assert policy.last_capture["action_prefix"].shape == (4, ACTION_DIM)
-
-
-def test_rollout_trace_writer_aligns_strided_token_predictions(tmp_path) -> None:
-    collector = RolloutTraceCollector(IMAGE_KEYS)
-    for token_idx in range(3):
-        obs = np.full((8, 8, 3), token_idx + 1, dtype=np.uint8)
-        pred = np.full((8, 8, 3), 10 + token_idx, dtype=np.uint8)
-        collector.add(
-            obs_u8={"cam": obs},
-            capture={
-                "predicted": {"cam": pred},
-                "action_prefix": np.full((4, ACTION_DIM), token_idx, dtype=np.float32),
-                "target_offset": 1,
-                "obs_stride": 4,
-            },
-            action=np.full((ACTION_DIM,), token_idx, dtype=np.float32),
-        )
-
-    path = write_rollout_prediction_trace(
-        collector,
-        path=tmp_path / "trace.h5",
-        task=TaskSpec(hdf5_path=tmp_path / "data.h5", env_name="FakeTask", horizon=12, env_meta={}),
-        episode_idx=0,
-        global_episode_id=0,
-        lang="test",
-        success=False,
-        crashed=False,
-        global_step=25_000,
-        action_sampling={"action_model": "diffusion"},
-        seed=7,
-    )
-
-    with h5py.File(path, "r") as f:
-        np.testing.assert_array_equal(f["frame_index"][:], np.asarray([0, 4, 8], dtype=np.int32))
-        assert f["action_sampled_chunk"].shape == (3, 4, ACTION_DIM)
-        assert np.all(f["rgb_predicted/cam"][0] == 0)
-        assert np.all(f["rgb_predicted/cam"][1] == 10)
-        assert np.all(f["rgb_predicted/cam"][2] == 11)
-        meta = json.loads(f["meta/json"][()])
-        assert meta["obs_stride"] == 4
-        assert meta["trace_action_prefix_len"] == 4
-        assert meta["trace_target_offset"] == 1
 
 
 def test_clip_action_for_env_modes() -> None:

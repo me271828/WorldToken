@@ -94,7 +94,7 @@ def test_multi_token_backbone_is_causal_within_frame() -> None:
 
 
 def test_full_model_keeps_action_condition_shape(tiny_cfg) -> None:
-    cfg = tiny_cfg(latent_dim=32, d_model=32, pred_next=False)
+    cfg = tiny_cfg(latent_dim=32, d_model=32)
     cfg["encoder"] = {
         "type": "attn_fusion_multi_token",
         "retained_tokens_per_frame": 4,
@@ -130,7 +130,7 @@ def test_full_model_keeps_action_condition_shape(tiny_cfg) -> None:
 def test_builder_rejects_multi_token_encoder_with_single_token_backbone(
     tiny_cfg,
 ) -> None:
-    cfg = tiny_cfg(latent_dim=32, d_model=32, pred_next=False)
+    cfg = tiny_cfg(latent_dim=32, d_model=32)
     cfg["encoder"] = {
         "type": "attn_fusion_multi_token",
         "retained_tokens_per_frame": 4,

@@ -80,31 +80,11 @@ class AttnFusionRawTokenObservationEncoder(AttnFusionObservationEncoder):
         }
 
     def encode(
-        self,
-        images: dict[str, torch.Tensor],
-        proprio: torch.Tensor,
-        lang_emb: torch.Tensor,
-        *,
-        return_obs_tokens: bool = False,
-        obs_tokens_source: str = "post_fusion",
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Return post-fusion raw tokens, optionally with the requested KV view."""
-        if return_obs_tokens:
-            source = self._normalize_obs_tokens_source(obs_tokens_source)
-            pre_seq, post_seq, b, t = self._fuse_with_pre_tokens(
-                images, proprio, lang_emb
-            )
-            obs_seq = pre_seq if source == "pre_fusion" else post_seq
-        else:
-            post_seq, b, t = self._fuse(images, proprio, lang_emb)
-            obs_seq = None
-
-        z = post_seq.view(b, t, self.tokens_per_frame, self.d_model)
-        if not return_obs_tokens:
-            return z
-        assert obs_seq is not None
-        obs_tokens = obs_seq.view(b, t, self.tokens_per_frame, self.d_model)
-        return z, obs_tokens
+        self, images: dict[str, torch.Tensor], proprio: torch.Tensor, lang_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return all post-fusion observation tokens in canonical order."""
+        post_seq, b, t = self._fuse(images, proprio, lang_emb)
+        return post_seq.view(b, t, self.tokens_per_frame, self.d_model)
 
 
 __all__ = ["AttnFusionRawTokenObservationEncoder"]

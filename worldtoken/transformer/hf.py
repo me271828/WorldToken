@@ -19,27 +19,14 @@ from worldtoken.transformer.base import SequenceBackbone
 
 
 def _load_backbone_classes(backbone_type: str):
-    """Return ``(ConfigCls, ModelCls)`` for the requested HF decoder family.
-
-    Adding another family is a one-line entry here -- the "try a different
-    attention block" knob.
-    """
-    kind = str(backbone_type).lower()
-    if kind == "qwen2":
-        from transformers import Qwen2Config as Cfg, Qwen2Model as Model  # type: ignore
-    elif kind == "llama":
-        from transformers import LlamaConfig as Cfg, LlamaModel as Model  # type: ignore
-    elif kind == "mistral":
-        from transformers import MistralConfig as Cfg, MistralModel as Model  # type: ignore
-    else:
-        raise ValueError(
-            f"unknown backbone_type {backbone_type!r}; supported: qwen2, llama, mistral "
-            "(add the HF Config/Model pair to _load_backbone_classes to extend)"
-        )
-    return Cfg, Model
+    """Load the Qwen2 decoder used by the paper policies."""
+    if str(backbone_type).lower() != "qwen2":
+        raise ValueError(f"unknown backbone_type {backbone_type!r}; supported: qwen2")
+    from transformers import Qwen2Config, Qwen2Model
+    return Qwen2Config, Qwen2Model
 
 
-SUPPORTED_BACKBONES = ("qwen2", "llama", "mistral")
+SUPPORTED_BACKBONES = ("qwen2",)
 DEFAULT_MAX_CONTEXT_LEN = 1024  # single source for the transformer's context-window default
 
 

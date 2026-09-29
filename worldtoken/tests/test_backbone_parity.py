@@ -76,7 +76,7 @@ def test_rejects_wrong_width_and_overlong_sequence() -> None:
         m(torch.randn(1, 33, 48))  # > max_context_len=32
 
 
-@pytest.mark.parametrize("backbone_type", ["qwen2", "llama"])
+@pytest.mark.parametrize("backbone_type", ["qwen2"])
 def test_registry_backbones_run(backbone_type: str) -> None:
     m = _make(backbone_type=backbone_type)
     y = m(torch.randn(2, 4, m.latent_dim))
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     test_backward_flows_to_all_params()
     test_causal_future_does_not_leak()
     test_rejects_wrong_width_and_overlong_sequence()
-    for bt in ("qwen2", "llama"):
+    for bt in ("qwen2",):
         test_registry_backbones_run(bt)
     test_unknown_backbone_raises()
     print("OK backbone parity tests")
