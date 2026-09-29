@@ -56,6 +56,11 @@ def main() -> None:
     elif processes != 1 or args.micro_batch or args.resume:
         parser.error("BC-Transformer uses its recorded native single-process recipe")
     config = expand(config, variables)
+    if not args.prepare_only:
+        from .check_setup import check_training_data, check_language_source
+
+        check_training_data(config, baseline=baseline, rmbench=is_rmbench)
+        check_language_source(config, baseline=baseline)
     run_dir = Path(variables["RUNS_ROOT"]) / paper["section"] / paper["run"]
     run_dir.mkdir(parents=True, exist_ok=True)
     launch = run_dir / "launch_config.json"

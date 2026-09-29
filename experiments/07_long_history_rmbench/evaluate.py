@@ -111,8 +111,17 @@ def main() -> None:
     parser.add_argument("--print-command",action="store_true")
     args=parser.parse_args()
     if not 1<=args.workers<=100: parser.error("--workers must be between 1 and 100")
+    if args.stress_seed is not None and args.history not in (None,608):
+        parser.error("Continuation experiments use C=608")
+    args.rmbench_root = args.rmbench_root.expanduser().resolve()
+    args.env_python = str(Path(args.env_python).expanduser())
+    args.checkpoint = args.checkpoint.expanduser()
+    if not args.print_command:
+        from experiments.common.check_setup import check_rmbench_environment, require_file
+
+        args.checkpoint = require_file(args.checkpoint, field="--checkpoint").resolve()
+        check_rmbench_environment(args.rmbench_root, args.env_python)
     if args.stress_seed is not None:
-        if args.history not in (None,608): parser.error("Continuation experiments use C=608")
         run_evaluation(args,608,args.stress_seed)
     else:
         for c in ([args.history] if args.history else [608,288,128,64,32]):
