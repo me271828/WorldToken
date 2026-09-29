@@ -24,11 +24,11 @@ from typing import Any
 
 import torch
 
-from diffusion_wm.rmbench_policy import (
+from worldtoken.rmbench_policy import (
     RMBenchRolloutPolicy,
     load_rmbench_rollout_policy,
 )
-from diffusion_wm.train_utils import load_checkpoint
+from worldtoken.train_utils import load_checkpoint
 
 
 HEADER = struct.Struct("!Q")

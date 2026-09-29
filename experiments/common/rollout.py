@@ -46,7 +46,7 @@ def main() -> None:
             repeats = [args.repeat]
         for repeat in repeats:
             output = args.run_dir.resolve() / "rollouts" / f"C{context}_repeat{repeat:02d}"
-            module = "experiments.04_robocasa_scaling.baseline.evaluate" if baseline else "diffusion_wm.eval_rollout"
+            module = "experiments.04_robocasa_scaling.baseline.evaluate" if baseline else "worldtoken.eval_rollout"
             command = [sys.executable, "-m", module, "--run-dir", str(args.run_dir.resolve()),
                        "--checkpoint", str(args.checkpoint.resolve()), "--output-dir", str(output),
                        "--dataset-from-config", "--robocasa-bc-eval-protocol", "--mode", "full",

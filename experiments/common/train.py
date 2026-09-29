@@ -69,7 +69,7 @@ def main() -> None:
         env["PYTHONPATH"] = os.pathsep.join([src, env["PYTHONPATH"]])
         env["ROBOCASA_RUN_DIR"] = str(run_dir)
     else:
-        module = "diffusion_wm.train_rmbench" if is_rmbench else "diffusion_wm.train_bc"
+        module = "worldtoken.train_rmbench" if is_rmbench else "worldtoken.train_bc"
         command = [sys.executable]
         if processes > 1:
             command += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={processes}"]

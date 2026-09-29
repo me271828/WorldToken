@@ -34,8 +34,8 @@ def main() -> None:
                              full_prefix_ratio_to_k1=full/reference,
                              analytic_cached_query_flops=linear*k+attention*k*n))
         if args.count_parameters:
-            from diffusion_wm.builder import build_model
-            from diffusion_wm.config import load_config
+            from worldtoken.builder import build_model
+            from worldtoken.config import load_config
             model,_=build_model(load_config(cfg),device="cpu")
             counts.append(dict(K=k,trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad)))
             del model

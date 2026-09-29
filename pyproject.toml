@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "diffusion_wm"
+name = "worldtoken"
 version = "0.1.0"
 description = "WorldToken: Time-First Sequence Modeling for Robotic Imitation Learning"
 requires-python = ">=3.10"
@@ -27,33 +27,33 @@ dev = ["pytest", "ruff"]
 analysis = ["matplotlib", "scipy"]
 
 [tool.setuptools]
-# The DPPO model subset under diffusion_wm/third_party/dppo is imported by filesystem path
+# The DPPO model subset under worldtoken/third_party/dppo is imported by filesystem path
 # (see dppo_compat.py), not as a discovered package -- its top-level layout
-# (model) is not namespaced under diffusion_wm. So it is excluded from
+# (model) is not namespaced under worldtoken. So it is excluded from
 # package discovery but shipped as package data, so non-editable installs
 # (pip install . / wheel) still carry it. Source-tree / `pip install -e .` is the
 # primary supported workflow.
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["diffusion_wm*", "experiments*"]
-exclude = ["diffusion_wm.third_party*"]
+include = ["worldtoken*", "experiments*"]
+exclude = ["worldtoken.third_party*"]
 
 [tool.setuptools.package-data]
-diffusion_wm = ["third_party/**/*"]
+worldtoken = ["third_party/**/*"]
 experiments = ["**/*.json", "**/*.json.gz", "**/*.patch", "**/*.md"]
 
 [tool.setuptools.exclude-package-data]
-diffusion_wm = ["third_party/**/*.pyc", "third_party/**/*.pyo", "third_party/**/__pycache__/*"]
+worldtoken = ["third_party/**/*.pyc", "third_party/**/*.pyo", "third_party/**/__pycache__/*"]
 
 [tool.pytest.ini_options]
-testpaths = ["diffusion_wm/tests"]
+testpaths = ["worldtoken/tests"]
 addopts = "-q"
 
 [tool.ruff]
 target-version = "py310"
 line-length = 120
-extend-exclude = ["diffusion_wm/third_party"]
+extend-exclude = ["worldtoken/third_party"]
 
 [tool.ruff.lint]
 # Conservative baseline: real bugs (pyflakes + syntax), not style/import-order churn.

@@ -15,7 +15,90 @@ The paper recipes are organized by the four main result sections:
 | 7. Long history on RMBench | [Initialization, Ranking continuation, formal and long-horizon evaluations](experiments/07_long_history_rmbench/README.md) |
 
 `main` contains the paper reproduction entry points. The Python implementation
-is in `diffusion_wm`.
+is in `worldtoken`.
+
+## Repository layout
+
+```text
+WorldToken/
+├── README.md                         # Start here: setup and paper workflows
+├── pyproject.toml                    # Package metadata and optional dependencies
+├── requirements.txt                  # Flat dependency list
+├── MANIFEST.in                       # Files included in source distributions
+├── environments/
+│   ├── README.md                     # Model and simulator installation
+│   └── core-constraints.txt          # Recorded model-environment versions
+├── experiments/                      # Paper recipes, launchers and analysis
+│   ├── common/                       # Shared training, rollout and table utilities
+│   │   ├── eval_windows/             # Fixed holdout window identities
+│   │   ├── robocasa_splits.json       # Fixed training and holdout demo selections
+│   │   └── robocasa_horizons.json     # Evaluation horizon for each task
+│   ├── 04_robocasa_scaling/
+│   │   ├── configs/                  # 50 grid recipes + 1 BC-Transformer recipe
+│   │   ├── baseline/                 # Native BC evaluator and robomimic patch
+│   │   └── summarize.py              # Scaling, RMSE and success-rate tables
+│   ├── 05_token_interface/
+│   │   ├── configs/                  # 10 K=4/K=50 recipes; K=1 uses Section 4
+│   │   ├── compute.py                # Temporal compute and parameter counts
+│   │   └── summarize.py              # Token-interface comparisons
+│   ├── 06_recent_history/
+│   │   ├── configs/                  # 6 matched-budget history recipes
+│   │   └── summarize.py              # Truncation and matched-budget comparisons
+│   ├── 07_long_history_rmbench/
+│   │   ├── configs/                  # Initialization and Ranking continuation
+│   │   ├── analysis/                 # Four retained behavioral-analysis scripts
+│   │   ├── seed_selection.json       # Fixed evaluation initial conditions
+│   │   ├── evaluate.py               # Formal and long-horizon evaluation launcher
+│   │   └── summarize.py              # RMBench result tables
+│   └── rmbench_tools/                # Policy servers, simulator workers and aggregation
+└── worldtoken/                       # Importable Python package
+    ├── encoder/                      # RGB, proprioception and language/task encoders
+    ├── transformer/                  # Causal temporal models and token ordering
+    ├── action_head/                  # Diffusion action heads and normalization
+    ├── dynamics/                     # Optional future-observation prediction
+    ├── envs/                         # RoboCasa specifications and simulation adapters
+    ├── training/                     # Holdout metrics and action/prediction traces
+    ├── configs/                      # 12 general development examples
+    ├── tests/                        # Model, data and evaluation regression tests
+    ├── third_party/dppo/             # Small BC diffusion-model subset and its license
+    ├── config.py, builder.py          # Parse configurations and assemble a model
+    ├── model.py, specs.py             # Model interface and observation/action shapes
+    ├── data.py, rmbench_data.py       # Demonstration loading and temporal sampling
+    ├── objective.py, rmbench_objective.py
+    ├── train_bc.py, train_rmbench.py  # RoboCasa and RMBench training
+    ├── eval_rollout.py               # RoboCasa closed-loop evaluation and videos
+    ├── eval_holdout_rmse.py          # Offline action-error evaluation
+    └── rmbench_policy.py             # RMBench history and action-chunk execution
+```
+
+Every result directory has its own README. Use `experiments/*/configs/` to
+reproduce the paper: the files in `worldtoken/configs/` are general modeling
+examples and do not define the paper runs. The
+[package guide](worldtoken/README.md) describes the remaining utility files.
+
+`runs/`, `results/` and `external/` are created locally for generated runs,
+analysis outputs and simulator checkouts. They are ignored by Git. Expert
+demonstrations and the companion records dataset are supplied separately.
+
+## Available functionality
+
+| Function | Main entry points |
+|---|---|
+| Prepare the fixed RoboCasa data splits and language cache | `experiments.common.prepare_robocasa`; cache preparation in `worldtoken.train_bc` |
+| Train the paper's RoboCasa policies and two RMBench stages; save and resume checkpoints | `experiments.common.train` |
+| Evaluate offline action RMSE, including fixed holdout windows and per-task metrics | `worldtoken.eval_holdout_rmse` |
+| Run RoboCasa policies in simulation and save episode results and videos | `experiments.common.rollout` |
+| Run RMBench formal history comparisons and continuation after success | `experiments.07_long_history_rmbench.evaluate` |
+| Recompute the four results' tables, numerical figures and behavioral analyses | Section `summarize` modules; `experiments.common.plot` |
+| Compare token-interface compute and count model parameters | `experiments.05_token_interface.compute` |
+| Explore optional dynamics, encoder, temporal-model and action-head variants | Components and example configurations in `worldtoken/` |
+
+The optional components include FiLM, transition, patch-DiT and token-translator
+dynamics; MLP and U-Net diffusion heads; current-observation and history-conditioned
+DiT variants; and additional temporal backbones. These are separate from the
+paper recipes. RL, observation autoencoder reconstruction and the standalone
+robomimic benchmark workflows are not included. RoboCasa's language encoder and
+native BC baseline still use the external robomimic library.
 
 ## Setup and data
 
@@ -132,7 +215,7 @@ recompute their temporal histories with `use_cache=False`.
 
 ## Implementation
 
-[Model structure](diffusion_wm/README.md) documents the observation encoders,
+[Model structure](worldtoken/README.md) documents the observation encoders,
 temporal backbones and action head. `experiments/common` contains shared
 configuration, data preparation and table code. `experiments/rmbench_tools`
 contains the model server and simulator workers used for Section 7.

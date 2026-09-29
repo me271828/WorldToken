@@ -23,16 +23,16 @@ from typing import Any
 import numpy as np
 import torch
 
-from diffusion_wm import eval_rollout as common
-from diffusion_wm.envs.robocasa import (
+from worldtoken import eval_rollout as common
+from worldtoken.envs.robocasa import (
     ROBOCASA_ACTION_DIM,
     ROBOCASA_DISCRETE_ACTION_DIMS,
     ROBOCASA_DISCRETE_ACTION_NAMES,
     ROBOCASA_LOW_DIM_DIMS,
     ROBOCASA_LOW_DIM_KEYS,
 )
-from diffusion_wm.envs.robocasa_rollout import ClipLangEmbeddingProvider
-from diffusion_wm.train_utils import json_ready, select_device, write_json
+from worldtoken.envs.robocasa_rollout import ClipLangEmbeddingProvider
+from worldtoken.train_utils import json_ready, select_device, write_json
 
 
 def parse_args() -> argparse.Namespace:

@@ -47,7 +47,7 @@ For a trained example:
 
 ```bash
 RUN="$RUNS_ROOT/04_robocasa_scaling/phase1grid_d50_n1_nodyn_seed0_5k_cuda6"
-python -m diffusion_wm.eval_holdout_rmse \
+python -m worldtoken.eval_holdout_rmse \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt"
 python -m experiments.common.rollout --config "$CONFIG" \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt" --all
