@@ -101,7 +101,8 @@ cd WorldToken
 ```
 
 Follow [environment setup](environments/README.md) for model and simulator
-dependencies. There are three separate inputs:
+dependencies, then [download and validate the original demonstrations](environments/DATA.md).
+There are three separate inputs:
 
 - Original expert demonstrations for training: RoboCasa HDF5 files and RMBench demonstrations.
 - Trained checkpoints produced by the training commands, for new rollout evaluations.
@@ -123,11 +124,13 @@ The training data layout is:
 $DATA_ROOT/
   robocasa/mg_im/v0.1/single_stage/<category>/<task>/mg/<collection>/demo_gentex_im128_randcams.hdf5
   rmbench/<task>/demo_clean/data/...
+  rmbench/<task>/demo_clean/instructions/...
 ```
 
 Prepare RoboCasa's fixed training masks and common 100-demo-per-task holdout:
 
 ```bash
+python -m experiments.common.prepare_robocasa --data-root "$DATA_ROOT" --check-only
 python -m experiments.common.prepare_robocasa --data-root "$DATA_ROOT"
 ```
 
@@ -156,7 +159,10 @@ python -m experiments.common.train \
   --processes 1 --micro-batch 48
 ```
 
-Add `--prepare-only` to write the resolved configuration and print its command.
+Before spawning training workers, the launcher checks dataset files, required
+masks/instructions and the language-wrapper import. Add `--prepare-only` to
+write the resolved configuration and print its command without checking local
+data or launching training; it is not a successful startup test.
 Recipe filenames, run names and output directories use the public run names
 in the records dataset (for example, `scaling_n2_d300_seed0`). Each records
 run's `run_info.json` preserves `original_run_name` for tracing historical

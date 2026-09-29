@@ -1,0 +1,13 @@
+# Runtime dependencies from the upstream v0.2 setup.py that are not already
+# supplied by the model environment / pinned robosuite. Install with core constraints.
+# Install RoboCasa itself with --no-deps: its metadata pins numpy==1.23.3,
+# whereas the recorded model environment used 1.23.5 (also supported by numba 0.56.4).
+numba==0.56.4
+pygame
+Pillow
+pynput
+tqdm
+termcolor
+lxml
+hidapi
+tianshou==0.4.10
