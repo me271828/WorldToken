@@ -37,7 +37,6 @@ from experiments.rmbench_tools.rmbench_long_horizon_common import (
     iter_committed_actions,
     restore_environment_state,
     right_gripper_joint_qpos,
-    sha256_file,
     validate_restored_observation,
     validation_payload,
 )
@@ -97,7 +96,6 @@ def finalize_video_segment(
     recording.replace(final)
     return {
         "path": str(final.resolve()),
-        "sha256": sha256_file(final),
         "bytes": final.stat().st_size,
     }
 
@@ -272,7 +270,6 @@ def write_checkpoint(
         "validation": validation_payload(task, validation_observation),
         "policy_state": {
             "path": "policy_state.pt",
-            "sha256": policy_result["sha256"],
             "bytes": int(policy_result["bytes"]),
             "history_length": int(policy_result["history_length"]),
         },
@@ -287,7 +284,6 @@ def write_checkpoint(
         "next_segment_index": int(next_segment_index),
         "action_steps": int(task.take_action_cnt),
         "checkpoint_status": checkpoint_status,
-        "metadata_sha256": sha256_file(final / "metadata.json"),
     }
     atomic_json(checkpoints / "latest.json", latest)
     return final, latest

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
-import hashlib
 import json
 import math
 import multiprocessing as mp
@@ -872,11 +871,6 @@ def episode_seed_manifest(tasks: list[TaskSpec], *, episodes_per_task: int, seed
                 }
             )
     return manifest
-
-
-def stable_json_sha256(payload: Any) -> str:
-    blob = json.dumps(json_ready(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def unique_rows_by_global_episode(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
@@ -2101,26 +2095,8 @@ def run_suite(
     deduped_rows = unique_rows_by_global_episode(rows)
     rows = sorted(deduped_rows.values() if deduped_rows else rows, key=episode_sort_key)
     summary = summarize_episodes(rows)
-    canonical_manifest = episode_seed_manifest(
-        tasks,
-        episodes_per_task=episodes_per_task,
-        seed=seed,
-    )
-    split_manifest = (
-        canonical_manifest
-        if execution_task_names is None
-        else [
-            item
-            for item in canonical_manifest
-            if str(item["task"]) in execution_task_names
-        ]
-    )
     summary["episode_seed_scheme"] = EPISODE_SEED_SCHEME
-    summary["episode_seed_manifest_sha256"] = stable_json_sha256(split_manifest)
     if execution_task_names is not None:
-        summary["canonical_episode_seed_manifest_sha256"] = stable_json_sha256(
-            canonical_manifest
-        )
         summary["execution_tasks"] = sorted(execution_task_names)
     summary["episode_seed_contract"] = (
         "RoboCasa envs are created from the per-episode env_seed; shard count and "
@@ -2246,9 +2222,7 @@ def main(argv: list[str] | None = None) -> int:
         episode_seed_manifest_summary[split_name] = {
             "episodes_per_task": int(split_episodes_per_task),
             "episodes": len(split_manifest),
-            "sha256": stable_json_sha256(split_manifest),
             "canonical_episodes": len(canonical_manifest),
-            "canonical_sha256": stable_json_sha256(canonical_manifest),
         }
 
     eval_config = {
@@ -2297,7 +2271,6 @@ def main(argv: list[str] | None = None) -> int:
         "robosuite_file": Path(robosuite.__file__).resolve(),
         "robosuite_version": str(robosuite.__version__),
         "robosuite_commit": os.environ.get("ROBOSUITE_COMMIT"),
-        "robosuite_controller_sha256": os.environ.get("ROBOSUITE_CONTROLLER_SHA256"),
         "runtime_tag": os.environ.get("ROLLOUT_RUNTIME_TAG"),
         "env_backend": args.env_backend,
         "env_worker_env": env_worker_env,

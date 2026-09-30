@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import gc
+import gzip
 import hashlib
 import json
 import os
 import time
+import warnings
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, default=None, help="Defaults to checkpoint_step_<max_steps>.pt.")
+    parser.add_argument(
+        "--eval-window-spec", type=Path,
+        help="Override config.eval_window_spec with the matching recipe's fixed window JSON or JSON.GZ.",
+    )
+    parser.add_argument(
+        "--require-fixed-windows", action="store_true",
+        help="Require an explicit fixed window file; use for paper RMSE reproduction.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -170,8 +180,38 @@ def load_persisted_holdout_refs(run_dir: Path) -> list[RoboCasaDemoRef]:
     return sorted(refs, key=lambda ref: ref.episode_key)
 
 
-def _config_sha256(path: Path) -> str:
+def _window_spec_sha256(path: Path) -> str:
+    """Identify fixed-window content so cached metrics cannot use different crops."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def resolve_eval_window_spec(
+    config: dict[str, Any], override: Path | str | None = None, *, required: bool = False,
+) -> Path | None:
+    value = override if override is not None else config.get("eval_window_spec")
+    if value is None or not str(value).strip():
+        message = (
+            "No fixed holdout windows supplied. Set config.eval_window_spec or --eval-window-spec "
+            "to the file in this run's matching paper recipe; do not select a file by context length alone."
+        )
+        if required:
+            raise ValueError(message)
+        warnings.warn(message + " Falling back to episode-key-based crop sampling.", UserWarning, stacklevel=2)
+        return None
+    path = expand_path_placeholders(value)
+    assert path is not None
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"fixed holdout window file not found: {path}")
+    return path
+
+
+def _legacy_metrics_path(run_dir: Path) -> Path | None:
+    for name in ("metrics.jsonl", "metrics.jsonl.gz"):
+        path = run_dir / name
+        if path.is_file():
+            return path
+    return None
 
 
 def _is_rmse_output_key(key: str) -> bool:
@@ -199,11 +239,12 @@ def _is_legacy_derived_rmse_key(key: str) -> bool:
 
 
 def _original_final_holdout_metrics(run_dir: Path, step: int) -> dict[str, float]:
-    path = run_dir / "metrics.jsonl"
-    if not path.is_file():
+    path = _legacy_metrics_path(run_dir)
+    if path is None:
         return {}
     found: dict[str, float] = {}
-    with path.open("r", encoding="utf-8") as f:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as f:
         for line in f:
             try:
                 row = json.loads(line)
@@ -228,7 +269,7 @@ def legacy_parity_report(run_dir: Path, step: int, current: dict[str, float], *,
     max_key = max(diffs, key=diffs.get) if diffs else None
     max_abs_diff = float(diffs[max_key]) if max_key is not None else None
     return {
-        "reference": str(run_dir / "metrics.jsonl"),
+        "reference": str(_legacy_metrics_path(run_dir) or run_dir / "metrics.jsonl"),
         "compared_metric_count": len(common),
         "reference_metric_count": len(reference),
         "max_abs_diff": max_abs_diff,
@@ -249,6 +290,15 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = args.run_dir.expanduser().resolve()
     config_path = run_dir / "config.json"
     config = _load_json(config_path)
+    window_spec = resolve_eval_window_spec(
+        config, args.eval_window_spec, required=bool(args.require_fixed_windows),
+    )
+    window_spec_sha256 = _window_spec_sha256(window_spec) if window_spec is not None else None
+    if window_spec is not None and (args.debug_max_demos is not None or args.debug_crops_per_demo is not None):
+        raise ValueError(
+            "Fixed-window evaluation requires the complete saved holdout split and crop count; "
+            "omit --debug-max-demos and --debug-crops-per-demo."
+        )
     checkpoint = resolve_final_checkpoint(run_dir, config, args.checkpoint)
     output = (args.output or default_output_path(run_dir, checkpoint)).expanduser().resolve()
     save_action_trace = bool(args.save_action_trace or args.action_trace_output is not None)
@@ -258,6 +308,22 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     trace_already_exists = action_trace_output.is_file()
     if output.is_file() and (not save_action_trace or trace_already_exists) and not bool(args.force):
         result = _load_json(output)
+        cached_protocol = result.get("protocol") or {}
+        if (cached_protocol.get("eval_window_spec_sha256") != window_spec_sha256
+                or (window_spec is None and cached_protocol.get("eval_window_spec"))):
+            raise RuntimeError(
+                "Existing RMSE output does not match the requested fixed holdout windows "
+                "(or predates window provenance). Use --force or a new --output to recompute."
+            )
+        if args.require_legacy_parity:
+            cached_parity = result.get("legacy_v1_parity") or {}
+            cached_diff = cached_parity.get("max_abs_diff")
+            if (not cached_parity.get("passed", False) or cached_diff is None
+                    or not np.isfinite(cached_diff) or float(cached_diff) > float(args.legacy_parity_atol)):
+                raise RuntimeError(
+                    "Existing RMSE output has not passed legacy parity at the requested tolerance; "
+                    "use --force to recompute."
+                )
         print(
             json.dumps(
                 {
@@ -312,7 +378,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         low_dim_keys=tuple(ROBOCASA_LOW_DIM_KEYS) if bool(config.get("use_proprio", True)) else (),
         deterministic=False,
         crop_start_seed=int(config["eval_seed"]),
-        eval_window_spec=config.get("eval_window_spec"),
+        eval_window_spec=window_spec,
     )
     batch_size = int(args.batch_size or config.get("eval_batch_size") or config["batch_size"])
     num_workers = int(config.get("eval_num_workers", 0) if args.num_workers is None else args.num_workers)
@@ -404,7 +470,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "epoch": epoch,
         "seen_loss_tokens": seen_loss_tokens,
         "config": str(config_path),
-        "config_sha256": _config_sha256(config_path),
         "action_model": action_model,
         "device": str(device),
         "protocol": {
@@ -413,6 +478,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "holdout_task_counts": dict(sorted(Counter(ref.task_name for ref in refs).items())),
             "eval_sample_count": len(dataset),
             "eval_crops_per_demo": crops_per_demo,
+            "eval_window_spec": str(window_spec) if window_spec is not None else None,
+            "eval_window_spec_sha256": window_spec_sha256,
             "debug_subset": bool(
                 args.debug_max_demos is not None or args.debug_crops_per_demo is not None
             ),

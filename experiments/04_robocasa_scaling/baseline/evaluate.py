@@ -13,7 +13,6 @@ the checkpoint:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import random
@@ -80,14 +79,6 @@ def parse_args() -> argparse.Namespace:
         help="Load the checkpoint and resolve the protocol without creating an env or output.",
     )
     return parser.parse_args()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class RobomimicPolicyAdapter:
@@ -391,7 +382,10 @@ def main() -> int:
     ckpt_dict = FileUtils.maybe_dict_from_checkpoint(ckpt_path=str(checkpoint))
     config = json.loads(ckpt_dict["config"])
     protocol = resolve_policy_protocol(config)
-    datasets = common.datasets_from_config(config)
+    # Use portable sidecar paths; policy settings remain native to the checkpoint.
+    data_config_path = run_dir / "config.json"
+    data_config = common.load_json(data_config_path) if data_config_path.is_file() else config
+    datasets = common.datasets_from_config(data_config)
     tasks = common.discover_tasks(
         datasets,
         task_names=args.tasks,
@@ -406,14 +400,12 @@ def main() -> int:
     checkpoint_epoch = int(checkpoint.stem.rsplit("_", 1)[-1])
     steps_per_epoch = int(config["experiment"]["epoch_every_n_steps"])
     checkpoint_global_step = checkpoint_epoch * steps_per_epoch
-    checkpoint_sha256 = sha256_file(checkpoint)
 
     canonical_manifest = common.episode_seed_manifest(
         tasks,
         episodes_per_task=args.episodes_per_task,
         seed=args.seed,
     )
-    manifest_sha256 = common.stable_json_sha256(canonical_manifest)
     env_worker_env: dict[str, str] = {}
     if args.env_worker_cuda_visible_devices is not None:
         env_worker_env["CUDA_VISIBLE_DEVICES"] = (
@@ -434,13 +426,11 @@ def main() -> int:
         "event": "robomimic_baseline_preflight",
         "run_dir": run_dir,
         "checkpoint": checkpoint,
-        "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_epoch": checkpoint_epoch,
         "checkpoint_global_step": checkpoint_global_step,
         "algo_name": config["algo_name"],
         "task_count": len(tasks),
         "episodes_per_task": args.episodes_per_task,
-        "episode_seed_manifest_sha256": manifest_sha256,
         "frame_stack": int(config["train"]["frame_stack"]),
         **protocol,
     }
@@ -466,14 +456,11 @@ def main() -> int:
         "run_dir": run_dir,
         "output_dir": output_dir,
         "checkpoint": checkpoint,
-        "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_epoch": checkpoint_epoch,
         "checkpoint_global_step": checkpoint_global_step,
         "checkpoint_format": "robomimic_pth",
         "baseline_rollout_entry": Path(__file__).resolve(),
-        "baseline_rollout_entry_sha256": sha256_file(Path(__file__).resolve()),
         "common_rollout_entry": Path(common.__file__).resolve(),
-        "common_rollout_entry_sha256": sha256_file(Path(common.__file__).resolve()),
         "dataset": datasets,
         "dataset_from_config": True,
         "robocasa_bc_eval_protocol": True,
@@ -507,17 +494,11 @@ def main() -> int:
         "lang_cache": args.lang_cache.expanduser().resolve(),
         "robomimic_src": args.robomimic_src.expanduser().resolve(),
         "robomimic_commit": os.environ.get("ROBOMIMIC_COMMIT"),
-        "robomimic_dirty_diff_sha256": os.environ.get(
-            "ROBOMIMIC_DIRTY_DIFF_SHA256"
-        ),
         "robocasa_src": args.robocasa_src.expanduser().resolve(),
         "robosuite_src": os.environ.get("ROBOSUITE_SRC"),
         "robosuite_file": Path(robosuite.__file__).resolve(),
         "robosuite_version": str(robosuite.__version__),
         "robosuite_commit": os.environ.get("ROBOSUITE_COMMIT"),
-        "robosuite_controller_sha256": os.environ.get(
-            "ROBOSUITE_CONTROLLER_SHA256"
-        ),
         "runtime_tag": os.environ.get("ROLLOUT_RUNTIME_TAG"),
         "env_backend": args.env_backend,
         "env_worker_env": env_worker_env,
@@ -532,7 +513,6 @@ def main() -> int:
             args.mode: {
                 "episodes_per_task": int(args.episodes_per_task),
                 "episodes": len(canonical_manifest),
-                "sha256": manifest_sha256,
             }
         },
         "episode_seed_contract": (

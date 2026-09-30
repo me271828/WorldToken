@@ -30,14 +30,6 @@ PERIODIC_SWAPS = ((1, 2), (0, 2), (0, 1))  # middle-right, left-right, left-midd
 PERIODIC_SWAP_NAMES = ("middle_right", "left_right", "left_middle")
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -814,7 +806,6 @@ class SegmentTrajectoryWriter:
         self.partial_path.replace(self.final_path)
         return {
             "path": str(self.final_path.resolve()),
-            "sha256": sha256_file(self.final_path),
             "bytes": self.final_path.stat().st_size,
             "replans": self.replan_count,
             "actions": self.action_count,

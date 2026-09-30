@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import signal
 from collections import deque
@@ -16,14 +15,6 @@ from experiments.rmbench_tools.rmbench_model_server import RMBenchModelServer, p
 
 
 POLICY_STATE_SCHEMA = "rmbench_long_horizon_policy_state_v1"
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def export_policy_state(policy: Any, *, checkpoint_global_step: int) -> dict[str, Any]:
@@ -106,7 +97,6 @@ class LongHorizonModelServer(RMBenchModelServer):
             return {
                 "ok": True,
                 "path": str(path),
-                "sha256": _sha256(path),
                 "bytes": path.stat().st_size,
                 "history_length": policy.history_length,
             }
@@ -134,7 +124,6 @@ class LongHorizonModelServer(RMBenchModelServer):
                 "ok": True,
                 "session_id": session_id,
                 "history_length": policy.history_length,
-                "sha256": _sha256(path),
             }
         return super().dispatch(request)
 

@@ -46,12 +46,42 @@ original start frames and iteration order.
 For a trained example:
 
 ```bash
+export CODE_ROOT="$PWD"
 RUN="$RUNS_ROOT/04_robocasa_scaling/scaling_n1_d50_seed0"
 python -m worldtoken.eval_holdout_rmse \
-  --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt"
+  --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt" \
+  --require-fixed-windows
 python -m experiments.common.rollout --config "$CONFIG" \
   --run-dir "$RUN" --checkpoint "$RUN/checkpoint_step_00005000.pt" --all
 ```
+
+The offline evaluator uses `eval_window_spec` from the run's `config.json`.
+`--require-fixed-windows` fails if it is absent instead of falling back to
+hash-based window selection. For an older run config, pass
+`--eval-window-spec /absolute/path/to/the/matching/window.json.gz` as well.
+Take this path from **that run's recipe** under `configs/`: the two C=10
+window files preserve different historical start frames and are not
+interchangeable. Export `CODE_ROOT` from the repository root so portable
+`${CODE_ROOT}` paths resolve. The result JSON records the selected window
+file and evaluation settings under `protocol`.
+
+For paper comparisons, keep the recorded `eval_batch_size`, `eval_seed`,
+`holdout_rmse_samplers`, denoising settings and `precision`; changing batch
+boundaries can change diffusion samples even with fixed windows. The
+`--debug-*` subset options cannot be combined with fixed windows, which require
+the full saved split and crop count. The result includes a
+`legacy_v1_parity` comparison with the matching final-step holdout row in
+`metrics.jsonl`, or `metrics.jsonl.gz` if the uncompressed file is absent.
+Add `--require-legacy-parity` to make a missing reference or a difference
+above `--legacy-parity-atol` fail after saving the result. This strict check
+does not assume that different hardware or rebuilt language embeddings will
+reproduce every floating-point value. Inspect and report any discrepancy.
+
+Downloaded checkpoints need a new evaluation run directory containing the
+checkpoint config, matching `holdout_demos.json`, reference metrics and a
+language cache. Follow the checkpoint package's offline RMSE preparation
+example; a config and weight alone are insufficient. Keep the experiment
+records unchanged when remapping their historical data paths locally.
 
 `--all` launches three C=10 evaluations and one evaluation each at C=1, 2 and 5.
 Each evaluation has 23 tasks × 50 fixed episodes. All repeats use rollout seed 1
