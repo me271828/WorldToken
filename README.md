@@ -2,7 +2,7 @@
 
 Code for **WorldToken: Time-First Sequence Modeling for Robotic Imitation Learning**.
 
-[Paper](https://arxiv.org/abs/2608.22591) | [Hugging Face paper page](https://huggingface.co/papers/2608.22591)
+[Paper](https://arxiv.org/abs/2608.22591) | [Hugging Face paper page](https://huggingface.co/papers/2608.22591) | [Experiment records](https://huggingface.co/datasets/mepi31415/WorldToken_Experiment_Records) | [Checkpoints](https://huggingface.co/mepi31415/WorldToken_Checkpoints)
 
 WorldToken encodes each observation into one continuous world token, models
 the observation history with a causal temporal transformer, and predicts action
@@ -115,13 +115,13 @@ The records dataset contains training logs, configurations, data lists,
 evaluation results and videos. It does not supply model checkpoints or the
 original expert demonstration image/action datasets.
 
-The companion experiment records and selected model checkpoints will be published
-on Hugging Face. Download links will be added here after the uploads are complete.
+Companion repositories on Hugging Face: [experiment records](https://huggingface.co/datasets/mepi31415/WorldToken_Experiment_Records)
+and [model checkpoints](https://huggingface.co/mepi31415/WorldToken_Checkpoints).
 
 ```bash
 export DATA_ROOT=/path/to/expert-demonstrations
 export RUNS_ROOT="$PWD/runs"
-export RECORDS_ROOT=/path/to/worldtoken_Experiment_Record
+export RECORDS_ROOT=/path/to/WorldToken_Experiment_Records
 ```
 
 The training data layout is:

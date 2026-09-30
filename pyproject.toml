@@ -22,6 +22,8 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/me271828/WorldToken"
 Paper = "https://arxiv.org/abs/2608.22591"
+"Experiment Records" = "https://huggingface.co/datasets/mepi31415/WorldToken_Experiment_Records"
+Checkpoints = "https://huggingface.co/mepi31415/WorldToken_Checkpoints"
 
 [project.optional-dependencies]
 train = ["tqdm", "opencv-python-headless>=4.8,<5"]
