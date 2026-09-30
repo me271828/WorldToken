@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,9 @@ name = "worldtoken"
 version = "0.1.0"
 description = "WorldToken: Time-First Sequence Modeling for Robotic Imitation Learning"
 requires-python = ">=3.10"
+# WorldToken is MIT; bundled third-party portions retain Apache-2.0.
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
 dependencies = [
     "torch",
     "numpy",

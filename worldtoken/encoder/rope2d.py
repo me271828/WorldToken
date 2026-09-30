@@ -1,3 +1,14 @@
+# SPDX-License-Identifier: MIT AND Apache-2.0
+# Copyright (c) 2026 WorldToken authors (original additions).
+# Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+#
+# The copied Qwen2-VL rotary primitives and their adaptations remain licensed
+# under the Apache License, Version 2.0; see ../../licenses/Apache-2.0.txt.
+# WorldToken's original additions are licensed under MIT; see ../../LICENSE.
+# This file adapts the upstream vision attention to global multimodal attention
+# and adds query/key normalization and temperature controls. Attribution and
+# source references are recorded in ../../THIRD_PARTY_NOTICES.md.
+
 """2D vision RoPE + a global self-attention block for multi-source fusion.
 
 The rotary primitives (``rotate_half`` / ``apply_rotary_pos_emb_vision`` /

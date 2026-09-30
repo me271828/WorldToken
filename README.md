@@ -225,3 +225,13 @@ contains the model server and simulator workers used for Section 7.
 The code repository holds reproduction programs and fixed experiment inputs.
 Training logs, evaluation diagnostics and rollout videos belong in the companion
 records dataset. Generated runs and analysis outputs are ignored by Git.
+
+## License
+
+Original WorldToken code, configurations and documentation are released under
+the [MIT License](LICENSE). Bundled third-party code retains its original
+licenses, including Apache-2.0 for the Qwen2-VL rotary-embedding portions;
+see [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+Separately distributed model weights, demonstrations, experiment records and
+simulator assets are governed by their accompanying licenses.
