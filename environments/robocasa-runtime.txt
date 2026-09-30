@@ -1,7 +1,7 @@
-# Runtime dependencies from the upstream v0.2 setup.py that are not already
-# supplied by the model environment / pinned robosuite. Install with core constraints.
-# Install RoboCasa itself with --no-deps: its metadata pins numpy==1.23.3,
-# whereas the recorded model environment used 1.23.5 (also supported by numba 0.56.4).
+# Shared runtime requirements for the patched RoboCasa / robosuite sources.
+# Pass this file with core-constraints.txt to all simulator and robomimic installs.
+# MuJoCo must stay at the recorded version even when resolving mink dependencies.
+mujoco==3.2.6
 numba==0.56.4
 pygame
 Pillow

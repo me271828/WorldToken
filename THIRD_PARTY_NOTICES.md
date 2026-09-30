@@ -43,8 +43,25 @@ and changes to the RoboCasa branch of robomimic at commit
 The full upstream MIT license is provided in
 [licenses/MIT-robomimic.txt](licenses/MIT-robomimic.txt). WorldToken's changes
 provide library compatibility, shared language encoding and predictable output
-directories. WorldToken-authored patch additions are covered by the root MIT
+directories, and align dependency declarations with the recorded model environment.
+WorldToken-authored patch additions are covered by the root MIT
 license; the original excerpts retain the upstream copyright above.
+
+## RoboCasa and robosuite dependency patches (MIT)
+
+`environments/patches/robocasa-dependencies.patch` changes the dependency metadata
+of [RoboCasa v0.2](https://github.com/robocasa/robocasa/tree/756598a5be52e052339bb2d957426e39015c2afb)
+to use the recorded NumPy version and WorldToken's headless OpenCV distribution.
+The upstream copyright is Copyright (c) 2024 the RoboCasa Team; its MIT license
+is included in [licenses/MIT-robocasa.txt](licenses/MIT-robocasa.txt).
+
+`environments/patches/robosuite-dependencies.patch` changes the OpenCV dependency
+of [robosuite 1.5.0](https://github.com/ARISE-Initiative/robosuite/tree/dc7fcf9fa6cdf0796f79b4c873166a8fb9fe8c9e)
+to that same headless distribution. The upstream copyright is Copyright (c)
+2022 Stanford Vision and Learning Lab and UT Robot Perception and Learning Lab;
+its MIT license is included in [licenses/MIT-robosuite.txt](licenses/MIT-robosuite.txt).
+Both patches change installation metadata only; simulator implementation and
+assets remain supplied by the upstream projects.
 
 ## Separately supplied dependencies and research assets
 

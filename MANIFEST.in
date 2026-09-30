@@ -1,4 +1,5 @@
 # Include the fixed experiment inputs in source distributions.
 recursive-include experiments *.json *.json.gz *.patch *.md
+recursive-include environments *.md *.txt *.patch
 global-exclude *.py[cod]
 global-exclude __pycache__

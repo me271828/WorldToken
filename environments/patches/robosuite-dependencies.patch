@@ -1,0 +1,12 @@
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -21,7 +21,7 @@
+         "mujoco>=3.2.3",
+         "mink>=0.0.5",
+         "Pillow",
+-        "opencv-python",
++        "opencv-python-headless",
+         "pynput",
+         "termcolor",
+         "pytest",
